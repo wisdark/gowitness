@@ -9,6 +9,7 @@ import (
 
 	chrm "github.com/sensepost/gowitness/chrome"
 	log "github.com/sirupsen/logrus"
+	"golang.org/x/net/html"
 
 	"github.com/parnurzeal/gorequest"
 	"github.com/sensepost/gowitness/storage"
@@ -41,6 +42,12 @@ func ProcessURL(url *url.URL, chrome *chrm.Chrome, db *storage.Storage, timeout 
 		return
 	}
 
+	// parse the title
+	htmlDoc, _ := html.Parse(resp.Body)
+	title := getPageTitle(htmlDoc)
+	log.WithFields(log.Fields{"url": url, "title": title}).Info("Title parsed")
+	HTTPResponseStorage.Title = title
+
 	// update the response code
 	HTTPResponseStorage.ResponseCode = resp.StatusCode
 	HTTPResponseStorage.ResponseCodeString = resp.Status
@@ -61,7 +68,6 @@ func ProcessURL(url *url.URL, chrome *chrm.Chrome, db *storage.Storage, timeout 
 
 	// Parse any TLS information
 	if resp.TLS != nil {
-
 		// storage for the TLS information
 		SSLCertificate := storage.SSLCertificate{}
 
@@ -95,7 +101,7 @@ func ProcessURL(url *url.URL, chrome *chrm.Chrome, db *storage.Storage, timeout 
 	// Generate a safe filename to use
 	fname := SafeFileName(url.String()) + ".png"
 
-	// Get the tull path where we will be saving the screenshot to
+	// Get the full path where we will be saving the screenshot to
 	dst := filepath.Join(chrome.ScreenshotPath, fname)
 
 	HTTPResponseStorage.ScreenshotFile = dst
@@ -107,4 +113,28 @@ func ProcessURL(url *url.URL, chrome *chrm.Chrome, db *storage.Storage, timeout 
 
 	// Update the database with this entry
 	db.SetHTTPData(&HTTPResponseStorage)
+}
+
+// getPageTitle gets the contents of a <title> tag
+func getPageTitle(n *html.Node) string {
+
+	var title string
+	if n.Type == html.ElementNode && n.Data == "title" {
+
+		// handle empty <title> node
+		if n.FirstChild == nil {
+			return "(empty)"
+		}
+
+		return n.FirstChild.Data
+	}
+
+	for c := n.FirstChild; c != nil; c = c.NextSibling {
+		title = getPageTitle(c)
+		if title != "" {
+			break
+		}
+	}
+
+	return title
 }

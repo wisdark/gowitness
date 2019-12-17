@@ -27,36 +27,58 @@ var (
 	logFormat string
 
 	// 'global' flags
-	waitTimeout   int
-	resolution    string
-	chromeTimeout int
-	chromePath    string
-	userAgent     string
+	waitTimeout      int
+	resolution       string
+	chromeTimeout    int
+	chromeTimeBudget int
+	chromePath       string
+	userAgent        string
+	disableDb        bool
+	chromeArgvs      []string
 
 	// screenshot command flags
 	screenshotURL         string
 	screenshotDestination string
 
 	// file scanner command flags
-	sourceFile string
-	maxThreads int
+	sourceFile  string
+	maxThreads  int
+	prefixHTTP  bool
+	prefixHTTPS bool
+
+	// nmap scanner command flags
+	nmapFile      string
+	scanHostnames bool
+	nmapServices  []string
+	nmapPorts     []int
 
 	// range scanner command flags
 	scanCidr           []string
 	scanFileCidr       string
 	scanPorts          string
-	skipHTTP           bool
-	skipHTTPS          bool
+	skipHTTP           bool // used in nmap command too
+	skipHTTPS          bool // used in nmap command too
 	randomPermutations bool
+	appendURI          string
+	appendURIFile      string
 
-	// generate command
-	reportFileName string
+	// report generate command
+	reportFileName    string
+	reportChunks      int
+	perceptionSort    bool
+	statusCodeSort    bool
+	titleSort         bool
+	filterStatusCodes []int
+	ignoreFailed      bool
+
+	// report list command
+	colWidth int
 
 	// execution time
 	startTime = time.Now()
 
 	// version
-	version = "1.0.8"
+	version = "1.3.0"
 )
 
 // RootCmd represents the base command when called without any subcommands
@@ -69,10 +91,12 @@ var RootCmd = &cobra.Command{
 
 		// Init Google Chrome
 		chrome = chrm.Chrome{
-			Resolution:    resolution,
-			ChromeTimeout: chromeTimeout,
-			Path:          chromePath,
-			UserAgent:     userAgent,
+			Resolution:       resolution,
+			ChromeTimeout:    chromeTimeout,
+			ChromeTimeBudget: chromeTimeBudget,
+			Path:             chromePath,
+			UserAgent:        userAgent,
+			Argvs:            chromeArgvs,
 		}
 		chrome.Setup()
 
@@ -81,9 +105,14 @@ var RootCmd = &cobra.Command{
 			log.WithField("error", err).Fatal("Error in setting destination screenshot path.")
 		}
 
-		// open the database
 		db = storage.Storage{}
-		db.Open(dbLocation)
+
+		if disableDb {
+			db.Enabled = false
+		} else {
+			db.Enabled = true
+			db.Open(dbLocation)
+		}
 	},
 }
 
@@ -107,11 +136,14 @@ func init() {
 	RootCmd.PersistentFlags().StringVar(&cfgFile, "config", "", "config file (default is $HOME/.gowitness.yaml)")
 	RootCmd.PersistentFlags().IntVarP(&waitTimeout, "timeout", "T", 3, "Time in seconds to wait for a HTTP connection")
 	RootCmd.PersistentFlags().IntVarP(&chromeTimeout, "chrome-timeout", "", 90, "Time in seconds to wait for Google Chrome to finish a screenshot")
+	RootCmd.PersistentFlags().IntVarP(&chromeTimeBudget, "chrome-time-budget", "", 2, "Time in seconds to wait for pending network requests when loading a page in Google Chrome")
 	RootCmd.PersistentFlags().StringVarP(&chromePath, "chrome-path", "", "", "Full path to the Chrome executable to use. By default, gowitness will search for Google Chrome")
-	RootCmd.PersistentFlags().StringVarP(&userAgent, "user-agent", "", "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/60.0.3112.50 Safari/537.36", "Alernate UserAgent string to use for Google Chrome")
+	RootCmd.PersistentFlags().StringVarP(&userAgent, "user-agent", "", "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/77.0.3865.75 Safari/537.36", "Alternate UserAgent string to use for Google Chrome")
 	RootCmd.PersistentFlags().StringVarP(&resolution, "resolution", "R", "1440,900", "screenshot resolution")
 	RootCmd.PersistentFlags().StringVarP(&screenshotDestination, "destination", "d", ".", "Destination directory for screenshots")
+	RootCmd.PersistentFlags().BoolVarP(&disableDb, "disable-db", "", false, "Disable database features (wont write a gowitness.db)")
 	RootCmd.PersistentFlags().StringVarP(&dbLocation, "db", "D", "gowitness.db", "Destination for the gowitness database")
+	RootCmd.PersistentFlags().StringSliceVarP(&chromeArgvs, "chrome-arg", "g", []string{}, "Extra arguments to pass to chrome headless")
 }
 
 // initConfig reads in config file and ENV variables if set.

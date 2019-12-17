@@ -1,7 +1,7 @@
 <h1 align="center">
   <br>
-  <a href="https://github.com/sensepost/objection">
-    <img src="images/gowitness-logo.png" alt="objection"></a>
+  <a href="https://github.com/sensepost/gowitness">
+    <img src="images/gowitness-logo.png" alt="gowitness"></a>
   <br>
   <br>
 </h1>
@@ -10,6 +10,7 @@
 <p align="center">
   <a href="https://twitter.com/leonjza"><img src="https://img.shields.io/badge/Twitter-%40leonjza-blue.svg" alt="@leonjza" height="18"></a>
   <a href="https://goreportcard.com/report/github.com/sensepost/gowitness"><img src="https://goreportcard.com/badge/github.com/sensepost/gowitness" alt="Go Report Card" height="18"></a>
+  <a href="https://hub.docker.com/r/leonjza/gowitness"><img alt="Docker Cloud Build Status" src="https://img.shields.io/docker/cloud/build/leonjza/gowitness"></a>
 </p>
 <br>
 
@@ -21,19 +22,29 @@ Inspiration for `gowitness` comes from [Eyewitness](https://github.com/ChrisTrun
 
 ## installation
 
-All you would need is an installation of the latest Google Chrome or Chromium and `gowitness` itself. Binaries are available for download from the [releases](https://github.com/sensepost/gowitness/releases) page as part of tagged releases.
+All you would need is an installation of the latest Google Chrome or Chromium and `gowitness` itself. `gowitness` can be downloaded using `go get -u github.com/sensepost/gowitness` or using the
+binaries available for download from the [releases](https://github.com/sensepost/gowitness/releases) page.
 
-To build `gowitness` from source, follow the following steps:
+## running using docker
 
-* Ensure you have [dep](https://github.com/golang/dep) installed (`go get -v -u github.com/golang/dep/cmd/dep`)
-* Clone this repository to your `$GOPATH`'s `src/` directory so that it is in `sensepost/gowitness`
-* Run `dep ensure` to resolve dependencies
-* Use the `go` build tools, or run `make` to build the binaries in the `build/` directory
+To screenshot a page using docker, simply run the following command that would also pull the latest gowitness image:
 
-## usage
+```bash
+docker run --rm -it -v $(pwd)/screenshots:/screenshots leonjza/gowitness:latest single --url=https://www.google.com
+```
 
-```txt
-~ » gowitness -h
+Keep in mind that a folder needs to be mounted into the container for `gowitness` to write your screenshots to, otherwise they will be lost when the container exits. The container is configured with the `/screenshots/` directory as the working directory, so the above command mounts a local `screenshots/` directory there.
+
+If you want to read an nmap file, save it locally into a screenshots directory, and use it with:
+
+```bash
+docker run --rm -it -v $(pwd)/screenshots:/screenshots leonjza/gowitness:latest nmap -f /screenshots/nmap.xml
+```
+
+For any other commands, you can get help similar to the local binary install. For example:
+
+```bash
+docker run --rm -it -v $(pwd)/screenshots:/screenshots leonjza/gowitness:latest -h
 A commandline web screenshot and information gathering tool by @leonjza
 
 Usage:
@@ -41,28 +52,51 @@ Usage:
 
 Available Commands:
   file        Screenshot URLs sourced from a file
-  generate    Generate an HTML report from a database file
   help        Help about any command
+  nmap        Screenshot services from an Nmap XML file
+  report      Work with gowitness reports
   scan        Scan a CIDR range and take screenshots along the way
   single      Take a screenshot of a single URL
   version     Prints the version of gowitness
-
-Flags:
-      --chrome-path string   Full path to the Chrome executable to use. By default, gowitness will search for Google Chrome
-      --chrome-timeout int   Time in seconds to wait for Google Chrome to finish a screenshot (default 90)
-      --config string        config file (default is $HOME/.gowitness.yaml)
-  -D, --db string            Destination for the gowitness database (default "gowitness.db")
-  -d, --destination string   Destination directory for screenshots (default ".")
-  -h, --help                 help for gowitness
-      --log-format string    specify output (text or json) (default "text")
-      --log-level string     one of debug, info, warn, error, or fatal (default "info")
-  -R, --resolution string    screenshot resolution (default "1440,900")
-  -T, --timeout int          Time in seconds to wait for a HTTP connection (default 3)
-      --user-agent string    Alernate UserAgent string to use for Google Chrome (default "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/60.0.3112.50 Safari/537.36")
-
-Use "gowitness [command] --help" for more information about a command.
 ```
+
+## build from source
+
+To build `gowitness` from source, follow the following steps:
+
+* Ensure that you have at least golang version 1.13.
+* Clone this repository and `cd` into it.
+* Run `go build` to get the `gowitness` binary for the current machine.
+* Or, `make` to build for all targets. Binaries will be in the `build/` diretory.
+
+## usage examples
+
+### screenshot a single website
+
+`$ gowitness single --url=https://www.google.com/`
+
+This should result in a file being created called: `https-www.google.com.png`
+
+### screenshot a cidr
+
+`$ gowitness scan --cidr 192.168.0.0/24 --threads 20`
+
+This should result in many `.png` images in the current directory when complete. This can would also use `20` threads and not the default of `4`.
+
+### generate a report
+
+`$ gowitness report generate`
+
+This should result in an `report.html` file with a screenshot report.
+
+`$ gowitness report generate --sort-perception`
+
+This should result in an `report.html` file with a screenshot report where screenshots are sorted using perception hashing.
+
+`$ gowitness report list`
+
+This should list the entries in the `gowitness.db` file.
 
 ## license
 
-gowitness is licensed under a [Creative Commons Attribution-NonCommercial-ShareAlike 4.0 International License](http://creativecommons.org/licenses/by-nc-sa/4.0/) Permissions beyond the scope of this license may be available at http://sensepost.com/contact/.
+`gowitness` is licensed under a [GNU General Public v3 License](https://www.gnu.org/licenses/gpl-3.0.en.html). Permissions beyond the scope of this license may be available at http://sensepost.com/contact/.

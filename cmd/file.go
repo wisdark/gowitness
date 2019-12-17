@@ -2,8 +2,10 @@ package cmd
 
 import (
 	"bufio"
+	"fmt"
 	"net/url"
 	"os"
+	"strings"
 	"sync/atomic"
 	"text/template"
 	"time"
@@ -30,6 +32,8 @@ $ gowitness file -s ~/Desktop/urls
 $ gowitness file --source ~/Desktop/urls --threads -2
 `,
 	Run: func(cmd *cobra.Command, args []string) {
+
+		validateFileCmdFlags()
 
 		log.WithField("source", sourceFile).Debug("Reading source file")
 
@@ -65,6 +69,16 @@ $ gowitness file --source ~/Desktop/urls --threads -2
 
 			candidate := scanner.Text()
 
+			if !(strings.HasPrefix(candidate, `http://`) || strings.HasPrefix(`https://`, candidate)) && (prefixHTTP || prefixHTTPS) {
+				if prefixHTTP {
+					log.WithFields(log.Fields{"candidate": candidate}).Warn("Prefixing candiate with http://")
+					candidate = fmt.Sprintf(`%s%s`, `http://`, candidate)
+				} else if prefixHTTPS {
+					log.WithFields(log.Fields{"candidate": candidate}).Warn("Prefixing candiate with https://")
+					candidate = fmt.Sprintf(`%s%s`, `https://`, candidate)
+				} // TODO: Refactor this a bit to support adding both
+			}
+
 			u, err := url.ParseRequestURI(candidate)
 			if err != nil {
 
@@ -97,9 +111,20 @@ $ gowitness file --source ~/Desktop/urls --threads -2
 	},
 }
 
+// Validates that the arguments received for fileCmd is valid.
+func validateFileCmdFlags() {
+
+	if prefixHTTP && prefixHTTPS {
+		log.WithFields(log.Fields{"prefix-http": prefixHTTP, "prefix-https": prefixHTTPS}).
+			Fatal("Both --prefix-http and --prefix-https cannot be set")
+	}
+}
+
 func init() {
 	RootCmd.AddCommand(fileCmd)
 
 	fileCmd.Flags().StringVarP(&sourceFile, "source", "s", "", "The source file containing urls")
 	fileCmd.Flags().IntVarP(&maxThreads, "threads", "t", 4, "Maximum concurrent threads to run")
+	fileCmd.Flags().BoolVarP(&prefixHTTP, "prefix-http", "", false, "Prefix file entries with http:// that have none")
+	fileCmd.Flags().BoolVarP(&prefixHTTPS, "prefix-https", "", false, "Prefix file entries with https:// that have none")
 }

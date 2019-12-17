@@ -38,6 +38,15 @@ requests that are made wont follow each other on the same host.
 This may be useful in cases where too many ports specified by the
 --ports flag might trigger port scan alerts.
 
+The --append-uri and --append-uri-file flags will generate extra permutations
+where requests to these URI's will also be made. Consider an example network
+range that would scan 192.168.0.1 on port 80, using '--append-uri foo' would
+result in a permutation such as http://192.168.0.1:80/ including the permutation
+http://192.168.0.1:80/foo.
+Warning: Using a file to source URI's from using --append-uri-file with a large
+amount of content will dramatically increase the number of permutations that
+would be generated and utimately probed. Use with caution.
+
 For example:
 
 $ gowitness scan --cidr 192.168.0.0/24
@@ -45,6 +54,8 @@ $ gowitness scan --cidr 192.168.0.0/24 --cidr 10.10.0.0/24
 $ gowitness scan --threads 20 --ports 80,443,8080 --cidr 192.168.0.0/24
 $ gowitness scan --threads 20 --ports 80,443,8080 --cidr 192.168.0.1/32 --no-https
 $ gowitness --log-level debug scan --threads 20 --ports 80,443,8080 --no-http --cidr 192.168.0.0/30
+$ gowitness scan --ports 80,443,8080 --cidr 192.168.0.0/30 --append-uri '/admin'
+$ gowitness scan --ports 80,443,8080 --cidr 192.168.0.0/30 --append-uri-file ~/wordlists/adminpanels.txt
 `,
 	Run: func(cmd *cobra.Command, args []string) {
 
@@ -85,6 +96,42 @@ $ gowitness --log-level debug scan --threads 20 --ports 80,443,8080 --no-http --
 		log.WithFields(log.Fields{"total-ips": len(ips)}).Debug("Finished parsing CIDR ranges")
 
 		permutations, err := utils.Permutations(ips, ports, skipHTTP, skipHTTPS)
+
+		// uri appends
+		if appendURI != "" {
+			log.WithFields(log.Fields{"append-uri": appendURI}).Info("Appending URI to permutations")
+			for _, permutation := range permutations {
+				permutations = append(permutations, permutation+appendURI)
+			}
+		} else if appendURIFile != "" {
+			var newPermutations []string
+			log.WithFields(log.Fields{"append-uri-file": appendURIFile}).Info("Appending URIs from file")
+			o, err := os.Open(appendURIFile)
+			if err != nil {
+				log.WithFields(log.Fields{"append-uri-file": appendURIFile, "error": err}).
+					Fatal("Unable to open file to read URIs from")
+			}
+			scanner := bufio.NewScanner(o)
+			for scanner.Scan() {
+				u := scanner.Text()
+				if !strings.HasPrefix(u, `/`) {
+					log.WithField("append-uri-from-file", u).Debug("Prefixing file candidate with /")
+					u = `/` + u
+				}
+
+				log.Debug(u)
+
+				for _, permutation := range permutations {
+					log.Debug(permutation, permutation+u)
+					newPermutations = append(newPermutations, permutation+u)
+				}
+			}
+
+			// figure out how to do this without yet another loop
+			for _, k := range newPermutations {
+				permutations = append(permutations, k)
+			}
+		}
 
 		if randomPermutations {
 			log.WithFields(log.Fields{"cidr-count": len(cidrs)}).Info("Randomizing permutations")
@@ -198,6 +245,19 @@ func validateScanCmdFlags() {
 		log.WithFields(log.Fields{"skip-http": skipHTTP, "skip-https": skipHTTPS}).
 			Fatal("Both HTTP and HTTPS cannot be skipped")
 	}
+
+	if appendURI != "" && appendURIFile != "" {
+		log.WithFields(log.Fields{"append-uri": appendURI, "append-uri-file": appendURIFile}).
+			Fatal("Both --append-uri and --append-uri-file cannot be set")
+	}
+
+	if appendURI != "" {
+		if !strings.HasPrefix(appendURI, `/`) {
+			log.WithFields(log.Fields{"append-uri": `/`}).
+				Warn("Append URI value does not start with a /, automatically appending it")
+			appendURI = `/` + appendURI
+		}
+	}
 }
 
 func init() {
@@ -210,4 +270,6 @@ func init() {
 	scanCmd.Flags().StringVarP(&scanPorts, "ports", "p", "80,443,8080,8443", "Ports to scan")
 	scanCmd.Flags().IntVarP(&maxThreads, "threads", "t", 4, "Maximum concurrent threads to run")
 	scanCmd.Flags().BoolVarP(&randomPermutations, "random", "r", false, "Randomize generated permutations")
+	scanCmd.Flags().StringVarP(&appendURI, "append-uri", "a", "", "Add permutations appending this URI")
+	scanCmd.Flags().StringVarP(&appendURIFile, "append-uri-file", "A", "", "Add permutations appending URI's from this file")
 }
