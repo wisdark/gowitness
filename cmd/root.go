@@ -47,10 +47,11 @@ var (
 	prefixHTTPS bool
 
 	// nmap scanner command flags
-	nmapFile      string
-	scanHostnames bool
-	nmapServices  []string
-	nmapPorts     []int
+	nmapFile            string
+	scanHostnames       bool
+	nmapServices        []string
+	nmapServiceContains string
+	nmapPorts           []int
 
 	// range scanner command flags
 	scanCidr           []string
@@ -78,7 +79,7 @@ var (
 	startTime = time.Now()
 
 	// version
-	version = "1.3.1"
+	version = "1.3.3"
 )
 
 // RootCmd represents the base command when called without any subcommands
