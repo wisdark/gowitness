@@ -2,249 +2,209 @@ package chrome
 
 import (
 	"context"
+	"crypto/tls"
+	"math"
+	"net/http"
 	"net/url"
-	"os"
-	"os/exec"
-	"regexp"
-	"strconv"
+	"strings"
 	"time"
 
-	"github.com/pkg/errors"
-
-	gover "github.com/mcuadros/go-version"
-	log "github.com/sirupsen/logrus"
+	"github.com/chromedp/cdproto/emulation"
+	"github.com/chromedp/cdproto/page"
+	"github.com/chromedp/chromedp"
+	"github.com/sensepost/gowitness/storage"
+	"gorm.io/gorm"
 )
 
 // Chrome contains information about a Google Chrome
 // instance, with methods to run on it.
 type Chrome struct {
-	Resolution       string
-	ChromeTimeout    int
-	ChromeTimeBudget int
-	Path             string
-	UserAgent        string
-	Argvs            []string
-
-	ScreenshotPath string
+	ResolutionX int
+	ResolutionY int
+	UserAgent   string
+	Timeout     int64
+	Delay       int
+	FullPage    bool
+	ChromePath  string
+	Proxy       string
 }
 
-// Setup configures a Chrome struct with the path
-// specified to what is available on this system.
-func (chrome *Chrome) Setup() {
-
-	chrome.chromeLocator()
+// NewChrome returns a new initialised Chrome struct
+func NewChrome() *Chrome {
+	return &Chrome{}
 }
 
-// ChromeLocator looks for an installation of Google Chrome
-// and returns the path to where the installation was found
-func (chrome *Chrome) chromeLocator() {
+// Preflight will preflight a url
+func (chrome *Chrome) Preflight(url *url.URL) (resp *http.Response, title string, err error) {
+	// purposefully ignore bad certs
+	transport := &http.Transport{
+		TLSClientConfig:   &tls.Config{InsecureSkipVerify: true},
+		DisableKeepAlives: true,
+	}
+	if chrome.Proxy != "" {
+		var erri error
+		proxyURL, erri := url.Parse(chrome.Proxy)
+		if err != nil {
+			return nil, "", erri
+		}
+		transport.Proxy = http.ProxyURL(proxyURL)
+	}
 
-	// if we already have a path to chrome (say from a cli flag),
-	// check that it exists. If not, continue with the finder logic.
-	if _, err := os.Stat(chrome.Path); os.IsNotExist(err) {
+	// purposefully ignore bad certs
+	client := http.Client{
+		Transport: transport,
+	}
 
-		log.WithFields(log.Fields{"user-path": chrome.Path, "error": err}).
-			Debug("Chrome path not set or invalid. Performing search")
-	} else {
+	req, err := http.NewRequest("GET", url.String(), nil)
+	if err != nil {
+		return
+	}
+	req.Header.Set("User-Agent", chrome.UserAgent)
+	req.Close = true
 
-		log.Debug("Chrome path exists, skipping search and version check")
+	ctx, cancel := context.WithTimeout(context.Background(), time.Duration(chrome.Timeout)*time.Second)
+	defer cancel()
+	req = req.WithContext(ctx)
+
+	resp, err = client.Do(req)
+	if err != nil {
 		return
 	}
 
-	// Possible paths for Google Chrome or chromium to be at.
-	paths := []string{
-		"/usr/bin/chromium",
-		"/usr/bin/chromium-browser",
-		"/usr/bin/google-chrome-stable",
-		"/usr/bin/google-chrome",
-		"/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
-		"/Applications/Google Chrome Canary.app/Contents/MacOS/Google Chrome Canary",
-		"/Applications/Chromium.app/Contents/MacOS/Chromium",
-		"C:/Program Files (x86)/Google/Chrome/Application/chrome.exe",
-	}
+	defer resp.Body.Close()
+	title, _ = GetHTMLTitle(resp.Body)
 
-	for _, path := range paths {
-
-		if _, err := os.Stat(path); os.IsNotExist(err) {
-			continue
-		}
-
-		log.WithField("chrome-path", path).Debug("Google Chrome path")
-		chrome.Path = path
-
-		// check the version for this chrome instance. if the current
-		// path is a version that is old enough, use that.
-		if chrome.checkVersion("60") {
-			break
-		}
-	}
-
-	// final check to ensure we actually found chrome
-	if chrome.Path == "" {
-		log.Fatal("Unable to locate a valid installation of Chrome to use. gowitness needs at least Chrome/" +
-			"Chrome Canary v60+. Either install Google Chrome or try specifying a valid location with " +
-			"the --chrome-path flag")
-	}
+	return
 }
 
-// checkVersion checks if the version at the chrome.Path is at
-// least the lowest version
-func (chrome *Chrome) checkVersion(lowestVersion string) bool {
+// StorePreflight will store preflight info to a DB
+func (chrome *Chrome) StorePreflight(url *url.URL, db *gorm.DB, resp *http.Response, title string, filename string) (uint, error) {
 
-	out, err := exec.Command(chrome.Path, "-version").Output()
-	if err != nil {
-		log.WithFields(log.Fields{"chrome-path": chrome.Path, "err": err}).
-			Error("An error occurred while trying to get the Chrome version")
-		return false
+	record := &storage.URL{
+		URL:            url.String(),
+		FinalURL:       resp.Request.URL.String(),
+		ResponseCode:   resp.StatusCode,
+		ResponseReason: resp.Status,
+		Proto:          resp.Proto,
+		ContentLength:  resp.ContentLength,
+		Filename:       filename,
+		Title:          title,
 	}
 
-	// Convert the output to a simple string
-	version := string(out)
-
-	re := regexp.MustCompile(`\d+(\.\d+)+`)
-	match := re.FindStringSubmatch(version)
-	if len(match) <= 0 {
-		log.WithField("chrome-path", chrome.Path).Debug("Unable to determine Chrome version.")
-
-		return false
+	// append headers
+	for k, v := range resp.Header {
+		hv := strings.Join(v, ", ")
+		record.AddHeader(k, hv)
 	}
 
-	// grab the first match in the version extraction
-	version = match[0]
+	// get TLS info, if any
+	if resp.TLS != nil {
+		record.TLS = storage.TLS{
+			Version:    resp.TLS.Version,
+			ServerName: resp.TLS.ServerName,
+		}
 
-	if gover.Compare(version, lowestVersion, "<") {
-		log.WithFields(log.Fields{"chrome-path": chrome.Path, "chromeversion": version}).
-			Warn("Chrome version is older than v" + lowestVersion)
+		for _, cert := range resp.TLS.PeerCertificates {
+			tlsCert := &storage.TLSCertificate{
+				SubjectCommonName:  cert.Subject.CommonName,
+				IssuerCommonName:   cert.Issuer.CommonName,
+				SignatureAlgorithm: cert.SignatureAlgorithm.String(),
+			}
 
-		return false
-	}
+			for _, name := range cert.DNSNames {
+				tlsCert.AddDNSName(name)
+			}
 
-	log.WithFields(log.Fields{"chrome-path": chrome.Path, "chromeversion": version}).Debug("Chrome version")
-	return true
-}
-
-// SetScreenshotPath sets the path for screenshots
-func (chrome *Chrome) SetScreenshotPath(p string) error {
-
-	if _, err := os.Stat(p); os.IsNotExist(err) {
-		return errors.New("Destination path does not exist")
-	}
-
-	log.WithField("screenshot-path", p).Debug("Screenshot path")
-	chrome.ScreenshotPath = p
-
-	return nil
-}
-
-// ScreenshotURL takes a screenshot of a URL
-func (chrome *Chrome) ScreenshotURL(targetURL *url.URL, destination string) error {
-
-	log.WithFields(log.Fields{"url": targetURL, "full-destination": destination}).
-		Debug("Full path to screenshot save using Chrome")
-
-	// Start with the basic headless arguments
-	var chromeArguments = []string{
-		"--headless", "--disable-gpu", "--hide-scrollbars",
-		"--disable-crash-reporter",
-		"--user-agent=" + chrome.UserAgent,
-		"--window-size=" + chrome.Resolution, "--screenshot=" + destination,
-		"--virtual-time-budget=" + strconv.Itoa(chrome.ChromeTimeBudget*1000),
-	}
-
-	// Append extra arguments
-	if len(chrome.Argvs) > 0 {
-		for _, a := range chrome.Argvs {
-			chromeArguments = append(chromeArguments, a)
+			record.TLS.TLSCertificates = append(record.TLS.TLSCertificates, *tlsCert)
 		}
 	}
 
-	log.Info(chromeArguments)
+	db.Create(record)
+	return record.ID, nil
+}
 
-	// When we are running as root, chromiun will flag the 'cant
-	// run as root' thing. Handle that case.
-	if os.Geteuid() == 0 {
+// Screenshot takes a screenshot of a URL and saves it to destination
+// Ref:
+// 	https://github.com/chromedp/examples/blob/255873ca0d76b00e0af8a951a689df3eb4f224c3/screenshot/main.go
+func (chrome *Chrome) Screenshot(url *url.URL) ([]byte, error) {
 
-		log.WithField("euid", os.Geteuid()).Debug("Running as root, adding --no-sandbox")
-		chromeArguments = append(chromeArguments, "--no-sandbox")
+	// setup chromedp default options
+	options := []chromedp.ExecAllocatorOption{}
+	options = append(options, chromedp.DefaultExecAllocatorOptions[:]...)
+	options = append(options, chromedp.UserAgent(chrome.UserAgent))
+	options = append(options, chromedp.DisableGPU)
+	options = append(options, chromedp.Flag("ignore-certificate-errors", true)) // RIP shittyproxy.go
+	options = append(options, chromedp.WindowSize(chrome.ResolutionX, chrome.ResolutionY))
+
+	if chrome.ChromePath != "" {
+		options = append(options, chromedp.ExecPath(chrome.ChromePath))
 	}
 
-	// Check if we need to add a proxy hack for Chrome headless to
-	// stfu about certificates :>
-	if targetURL.Scheme == "https" {
-
-		// Chrome headless... you suck. Proxy to the target
-		// so that we can ignore SSL certificate issues.
-		// proxy := shittyProxy{targetURL: targetURL}
-		originalPath := targetURL.Path
-		proxy := forwardingProxy{targetURL: targetURL}
-
-		// Give the shitty proxy a few moments to start up.
-		time.Sleep(500 * time.Millisecond)
-
-		// Start the proxy and grab the listening port we should tell
-		// Chrome to connect to.
-		if err := proxy.start(); err != nil {
-
-			log.WithField("error", err).Warning("Failed to start proxy for HTTPS request")
-			return err
-		}
-
-		// Update the URL scheme back to http, the proxy will handle the SSL
-		proxyURL, _ := url.Parse("http://localhost:" + strconv.Itoa(proxy.port) + "/")
-		proxyURL.Path = originalPath
-
-		// I am not 100% sure if this does anything, but lets add --allow-insecure-localhost
-		// anyways.
-		chromeArguments = append(chromeArguments, "--allow-insecure-localhost")
-
-		// set the URL to call to the proxy we are starting up
-		chromeArguments = append(chromeArguments, proxyURL.String())
-
-		// when we are done, stop the hack :|
-		defer proxy.stop()
-
-	} else {
-
-		// Finally add the url to screenshot
-		chromeArguments = append(chromeArguments, targetURL.String())
+	if chrome.Proxy != "" {
+		options = append(options, chromedp.ProxyServer(chrome.Proxy))
 	}
 
-	log.WithFields(log.Fields{"arguments": chromeArguments}).Debug("Google Chrome arguments")
-
-	// get a context to run the command in
-	ctx, cancel := context.WithTimeout(context.Background(), time.Duration(chrome.ChromeTimeout)*time.Second)
+	actx, acancel := chromedp.NewExecAllocator(context.Background(), options...)
+	ctx, cancel := chromedp.NewContext(actx)
+	defer acancel()
 	defer cancel()
 
-	// Prepare the command to run...
-	cmd := exec.CommandContext(ctx, chrome.Path, chromeArguments...)
+	var buf []byte
 
-	log.WithFields(log.Fields{"url": targetURL, "destination": destination}).Info("Taking screenshot")
+	if chrome.FullPage {
+		// straight from: https://github.com/chromedp/examples/blob/255873ca0d76b00e0af8a951a689df3eb4f224c3/screenshot/main.go#L54
+		if err := chromedp.Run(ctx, chromedp.Tasks{
+			chromedp.Navigate(url.String()),
+			chromedp.Sleep(time.Duration(chrome.Delay) * time.Second),
+			chromedp.ActionFunc(func(ctx context.Context) error {
+				// get layout metrics
+				_, _, contentSize, err := page.GetLayoutMetrics().Do(ctx)
+				if err != nil {
+					return err
+				}
 
-	// ... and run it!
-	startTime := time.Now()
-	if err := cmd.Start(); err != nil {
-		log.Fatal(err)
-	}
+				width, height := int64(math.Ceil(contentSize.Width)),
+					int64(math.Ceil(contentSize.Height))
 
-	// Wait for the screenshot to finish and handle the error that may occur.
-	if err := cmd.Wait(); err != nil {
+				// force viewport emulation
+				err = emulation.SetDeviceMetricsOverride(width, height, 1, false).
+					WithScreenOrientation(&emulation.ScreenOrientation{
+						Type:  emulation.OrientationTypePortraitPrimary,
+						Angle: 0,
+					}).Do(ctx)
+				if err != nil {
+					return err
+				}
 
-		// If if this error was as a result of a timeout
-		if ctx.Err() == context.DeadlineExceeded {
-			log.WithFields(log.Fields{"url": targetURL, "destination": destination, "err": err}).
-				Error("Timeout reached while waiting for screenshot to finish")
-			return err
+				// capture screenshot
+				buf, err = page.CaptureScreenshot().
+					WithQuality(100).
+					WithClip(&page.Viewport{
+						X:      contentSize.X,
+						Y:      contentSize.Y,
+						Width:  contentSize.Width,
+						Height: contentSize.Height,
+						Scale:  2,
+					}).Do(ctx)
+				if err != nil {
+					return err
+				}
+				return nil
+			}),
+		}); err != nil {
+			return nil, err
 		}
 
-		log.WithFields(log.Fields{"url": targetURL, "destination": destination, "err": err}).
-			Error("Screenshot failed")
-
-		return err
+	} else {
+		// normal viewport screenshot
+		if err := chromedp.Run(ctx, chromedp.Tasks{
+			chromedp.Navigate(url.String()),
+			chromedp.Sleep(time.Duration(chrome.Delay) * time.Second),
+			chromedp.CaptureScreenshot(&buf),
+		}); err != nil {
+			return nil, err
+		}
 	}
 
-	log.WithFields(log.Fields{
-		"url": targetURL, "destination": destination, "duration": time.Since(startTime),
-	}).Info("Screenshot taken")
-
-	return nil
+	return buf, nil
 }
