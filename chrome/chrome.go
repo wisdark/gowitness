@@ -44,7 +44,7 @@ func (chrome *Chrome) Preflight(url *url.URL) (resp *http.Response, title string
 	if chrome.Proxy != "" {
 		var erri error
 		proxyURL, erri := url.Parse(chrome.Proxy)
-		if err != nil {
+		if erri != nil {
 			return nil, "", erri
 		}
 		transport.Proxy = http.ProxyURL(proxyURL)
@@ -109,6 +109,7 @@ func (chrome *Chrome) StorePreflight(url *url.URL, db *gorm.DB, resp *http.Respo
 				SubjectCommonName:  cert.Subject.CommonName,
 				IssuerCommonName:   cert.Issuer.CommonName,
 				SignatureAlgorithm: cert.SignatureAlgorithm.String(),
+				PubkeyAlgorithm:    cert.PublicKeyAlgorithm.String(),
 			}
 
 			for _, name := range cert.DNSNames {
@@ -151,12 +152,27 @@ func (chrome *Chrome) Screenshot(url *url.URL) ([]byte, error) {
 
 	var buf []byte
 
+	// squash JavaScript dialog boxes such as alert();
+	chromedp.ListenTarget(ctx, func(ev interface{}) {
+		if _, ok := ev.(*page.EventJavascriptDialogOpening); ok {
+			go func() {
+				if err := chromedp.Run(ctx,
+					page.HandleJavaScriptDialog(true),
+				); err != nil {
+					panic(err)
+				}
+			}()
+		}
+	})
+
 	if chrome.FullPage {
 		// straight from: https://github.com/chromedp/examples/blob/255873ca0d76b00e0af8a951a689df3eb4f224c3/screenshot/main.go#L54
+
 		if err := chromedp.Run(ctx, chromedp.Tasks{
 			chromedp.Navigate(url.String()),
 			chromedp.Sleep(time.Duration(chrome.Delay) * time.Second),
 			chromedp.ActionFunc(func(ctx context.Context) error {
+
 				// get layout metrics
 				_, _, contentSize, err := page.GetLayoutMetrics().Do(ctx)
 				if err != nil {
@@ -197,6 +213,7 @@ func (chrome *Chrome) Screenshot(url *url.URL) ([]byte, error) {
 
 	} else {
 		// normal viewport screenshot
+
 		if err := chromedp.Run(ctx, chromedp.Tasks{
 			chromedp.Navigate(url.String()),
 			chromedp.Sleep(time.Duration(chrome.Delay) * time.Second),
