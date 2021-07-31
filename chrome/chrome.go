@@ -3,13 +3,11 @@ package chrome
 import (
 	"context"
 	"crypto/tls"
-	"math"
 	"net/http"
 	"net/url"
 	"strings"
 	"time"
 
-	"github.com/chromedp/cdproto/emulation"
 	"github.com/chromedp/cdproto/page"
 	"github.com/chromedp/chromedp"
 	"github.com/sensepost/gowitness/storage"
@@ -35,17 +33,18 @@ func NewChrome() *Chrome {
 }
 
 // Preflight will preflight a url
-func (chrome *Chrome) Preflight(url *url.URL) (resp *http.Response, title string, err error) {
+func (chrome *Chrome) Preflight(url *url.URL) (resp *http.Response, title string, technologies []string, err error) {
 	// purposefully ignore bad certs
 	transport := &http.Transport{
 		TLSClientConfig:   &tls.Config{InsecureSkipVerify: true},
 		DisableKeepAlives: true,
 	}
+
 	if chrome.Proxy != "" {
 		var erri error
 		proxyURL, erri := url.Parse(chrome.Proxy)
 		if erri != nil {
-			return nil, "", erri
+			return nil, "", nil, erri
 		}
 		transport.Proxy = http.ProxyURL(proxyURL)
 	}
@@ -73,12 +72,13 @@ func (chrome *Chrome) Preflight(url *url.URL) (resp *http.Response, title string
 
 	defer resp.Body.Close()
 	title, _ = GetHTMLTitle(resp.Body)
+	technologies, _ = GetTechnologies(resp)
 
 	return
 }
 
 // StorePreflight will store preflight info to a DB
-func (chrome *Chrome) StorePreflight(url *url.URL, db *gorm.DB, resp *http.Response, title string, filename string) (uint, error) {
+func (chrome *Chrome) StorePreflight(url *url.URL, db *gorm.DB, resp *http.Response, title string, technologies []string, filename string) (uint, error) {
 
 	record := &storage.URL{
 		URL:            url.String(),
@@ -95,6 +95,10 @@ func (chrome *Chrome) StorePreflight(url *url.URL, db *gorm.DB, resp *http.Respo
 	for k, v := range resp.Header {
 		hv := strings.Join(v, ", ")
 		record.AddHeader(k, hv)
+	}
+
+	for _, v := range technologies {
+		record.AddTechnologie(v)
 	}
 
 	// get TLS info, if any
@@ -166,47 +170,12 @@ func (chrome *Chrome) Screenshot(url *url.URL) ([]byte, error) {
 	})
 
 	if chrome.FullPage {
-		// straight from: https://github.com/chromedp/examples/blob/255873ca0d76b00e0af8a951a689df3eb4f224c3/screenshot/main.go#L54
+		// straight from: https://github.com/chromedp/examples/blob/849108f7da9f743bcdaef449699ed57cb4053379/screenshot/main.go
 
 		if err := chromedp.Run(ctx, chromedp.Tasks{
 			chromedp.Navigate(url.String()),
 			chromedp.Sleep(time.Duration(chrome.Delay) * time.Second),
-			chromedp.ActionFunc(func(ctx context.Context) error {
-
-				// get layout metrics
-				_, _, contentSize, err := page.GetLayoutMetrics().Do(ctx)
-				if err != nil {
-					return err
-				}
-
-				width, height := int64(math.Ceil(contentSize.Width)),
-					int64(math.Ceil(contentSize.Height))
-
-				// force viewport emulation
-				err = emulation.SetDeviceMetricsOverride(width, height, 1, false).
-					WithScreenOrientation(&emulation.ScreenOrientation{
-						Type:  emulation.OrientationTypePortraitPrimary,
-						Angle: 0,
-					}).Do(ctx)
-				if err != nil {
-					return err
-				}
-
-				// capture screenshot
-				buf, err = page.CaptureScreenshot().
-					WithQuality(100).
-					WithClip(&page.Viewport{
-						X:      contentSize.X,
-						Y:      contentSize.Y,
-						Width:  contentSize.Width,
-						Height: contentSize.Height,
-						Scale:  2,
-					}).Do(ctx)
-				if err != nil {
-					return err
-				}
-				return nil
-			}),
+			chromedp.FullScreenshot(&buf, 100),
 		}); err != nil {
 			return nil, err
 		}
