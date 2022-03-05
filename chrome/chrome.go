@@ -8,8 +8,10 @@ import (
 	"strings"
 	"time"
 
+	"github.com/chromedp/cdproto/network"
 	"github.com/chromedp/cdproto/page"
 	"github.com/chromedp/chromedp"
+	wappalyzer "github.com/projectdiscovery/wappalyzergo"
 	"github.com/sensepost/gowitness/storage"
 	"gorm.io/gorm"
 )
@@ -25,6 +27,16 @@ type Chrome struct {
 	FullPage    bool
 	ChromePath  string
 	Proxy       string
+	Headers     []string
+	HeadersMap  map[string]interface{}
+}
+
+var wappalyzerClient *wappalyzer.Wappalyze
+
+func InitWappalyzer() error {
+	var err error
+	wappalyzerClient, err = wappalyzer.New()
+	return err
 }
 
 // NewChrome returns a new initialised Chrome struct
@@ -34,6 +46,7 @@ func NewChrome() *Chrome {
 
 // Preflight will preflight a url
 func (chrome *Chrome) Preflight(url *url.URL) (resp *http.Response, title string, technologies []string, err error) {
+
 	// purposefully ignore bad certs
 	transport := &http.Transport{
 		TLSClientConfig:   &tls.Config{InsecureSkipVerify: true},
@@ -59,6 +72,12 @@ func (chrome *Chrome) Preflight(url *url.URL) (resp *http.Response, title string
 		return
 	}
 	req.Header.Set("User-Agent", chrome.UserAgent)
+
+	// set the preflight headers (type assertion for value)
+	for k, v := range chrome.HeadersMap {
+		req.Header.Set(k, v.(string))
+	}
+
 	req.Close = true
 
 	ctx, cancel := context.WithTimeout(context.Background(), time.Duration(chrome.Timeout)*time.Second)
@@ -172,25 +191,74 @@ func (chrome *Chrome) Screenshot(url *url.URL) ([]byte, error) {
 	if chrome.FullPage {
 		// straight from: https://github.com/chromedp/examples/blob/849108f7da9f743bcdaef449699ed57cb4053379/screenshot/main.go
 
-		if err := chromedp.Run(ctx, chromedp.Tasks{
-			chromedp.Navigate(url.String()),
-			chromedp.Sleep(time.Duration(chrome.Delay) * time.Second),
-			chromedp.FullScreenshot(&buf, 100),
-		}); err != nil {
-			return nil, err
+		// additional headers
+		if len(chrome.HeadersMap) > 0 {
+			if err := chromedp.Run(ctx, chromedp.Tasks{
+				network.Enable(),
+				network.SetExtraHTTPHeaders(network.Headers(chrome.HeadersMap)),
+				chromedp.Navigate(url.String()),
+				chromedp.Sleep(time.Duration(chrome.Delay) * time.Second),
+				chromedp.FullScreenshot(&buf, 100),
+			}); err != nil {
+				return nil, err
+			}
+		} else {
+			if err := chromedp.Run(ctx, chromedp.Tasks{
+				chromedp.Navigate(url.String()),
+				chromedp.Sleep(time.Duration(chrome.Delay) * time.Second),
+				chromedp.FullScreenshot(&buf, 100),
+			}); err != nil {
+				return nil, err
+			}
 		}
 
 	} else {
 		// normal viewport screenshot
 
-		if err := chromedp.Run(ctx, chromedp.Tasks{
-			chromedp.Navigate(url.String()),
-			chromedp.Sleep(time.Duration(chrome.Delay) * time.Second),
-			chromedp.CaptureScreenshot(&buf),
-		}); err != nil {
-			return nil, err
+		// additional headers
+		if len(chrome.HeadersMap) > 0 {
+			if err := chromedp.Run(ctx, chromedp.Tasks{
+				network.Enable(),
+				network.SetExtraHTTPHeaders(network.Headers(chrome.HeadersMap)),
+				chromedp.Navigate(url.String()),
+				chromedp.Sleep(time.Duration(chrome.Delay) * time.Second),
+				chromedp.CaptureScreenshot(&buf),
+			}); err != nil {
+				return nil, err
+			}
+		} else {
+			if err := chromedp.Run(ctx, chromedp.Tasks{
+				chromedp.Navigate(url.String()),
+				chromedp.Sleep(time.Duration(chrome.Delay) * time.Second),
+				chromedp.CaptureScreenshot(&buf),
+			}); err != nil {
+				return nil, err
+			}
 		}
 	}
 
 	return buf, nil
+}
+
+// initalize the headers Map. we do this given the format chromedp wants
+// Ref:
+// 	https://github.com/chromedp/examples/blob/master/headers/main.go
+func (chrome *Chrome) PrepareHeaderMap() {
+
+	if len(chrome.Headers) <= 0 {
+		return
+	}
+
+	// initialize the map
+	chrome.HeadersMap = make(map[string]interface{})
+
+	// split each header string and append to the map
+	for _, header := range chrome.Headers {
+
+		headerSlice := strings.SplitN(header, ":", 2)
+		// add header to the map
+		if len(headerSlice) == 2 {
+			chrome.HeadersMap[headerSlice[0]] = headerSlice[1]
+		}
+	}
 }
