@@ -6,16 +6,10 @@ import (
 	"github.com/sensepost/gowitness/cmd"
 )
 
-var (
-	//go:embed web/assets/*
-	assets embed.FS
-	//go:embed web/templates/*
-	templates embed.FS
-)
+//go:embed web/assets/* web/ui-templates/* web/static-templates/*
+var assets embed.FS
 
 func main() {
-	cmd.Assets = assets
-	cmd.Templates = templates
-
+	cmd.Embedded = assets
 	cmd.Execute()
 }

@@ -3,6 +3,7 @@ package storage
 import (
 	"encoding/json"
 	"strconv"
+	"time"
 
 	"gorm.io/gorm"
 )
@@ -19,11 +20,16 @@ type URL struct {
 	ContentLength  int64
 	Title          string
 	Filename       string
+	IsPDF          bool
 	PerceptionHash string
+	DOM            string
+
+	TLS TLS
 
 	Headers      []Header
-	TLS          TLS
 	Technologies []Technologie
+	Console      []ConsoleLog
+	Network      []NetworkLog
 }
 
 // AddHeader adds a new header to a URL
@@ -83,6 +89,7 @@ type Header struct {
 	gorm.Model
 
 	URLID uint
+
 	Key   string
 	Value string
 }
@@ -92,6 +99,7 @@ type Technologie struct {
 	gorm.Model
 
 	URLID uint
+
 	Value string
 }
 
@@ -99,7 +107,8 @@ type Technologie struct {
 type TLS struct {
 	gorm.Model
 
-	URLID           uint
+	URLID uint
+
 	Version         uint16
 	ServerName      string
 	TLSCertificates []TLSCertificate
@@ -109,7 +118,8 @@ type TLS struct {
 type TLSCertificate struct {
 	gorm.Model
 
-	TLSID              uint
+	TLSID uint
+
 	Raw                []byte
 	DNSNames           []TLSCertificateDNSName
 	SubjectCommonName  string
@@ -129,4 +139,39 @@ type TLSCertificateDNSName struct {
 
 	TLSCertificateID uint
 	Name             string
+}
+
+// ConsoleLog contains the console log, and exceptions emitted
+type ConsoleLog struct {
+	gorm.Model
+
+	URLID uint
+
+	Time  time.Time
+	Type  string
+	Value string
+}
+
+// RequestType are network log types
+type RequestType int
+
+const (
+	HTTP RequestType = 0
+	WS
+)
+
+// NetworkLog contains Chrome networks events that were emitted
+type NetworkLog struct {
+	gorm.Model
+
+	URLID uint
+
+	RequestID   string
+	RequestType RequestType
+	StatusCode  int64
+	URL         string
+	FinalURL    string
+	IP          string
+	Time        time.Time
+	Error       string
 }

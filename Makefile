@@ -6,7 +6,7 @@ APPVER := $(shell grep 'version =' cmd/version.go | cut -d \" -f2)
 PWD := $(shell pwd)
 LD_FLAGS := -ldflags="-s -w -X=github.com/sensepost/gowitness/cmd.gitHash=$(V) -X=github.com/sensepost/gowitness/cmd.goVer=$(G)"
 BIN_DIR := build
-DOCKER_GO_VER := 1.17.7# https://github.com/elastic/golang-crossbuild
+DOCKER_GO_VER := 1.19# https://github.com/elastic/golang-crossbuild
 DOCKER_RELEASE_BUILD_CMD := docker run --rm -it -v $(PWD):/go/src/github.com/sensepost/gowitness \
 	-w /go/src/github.com/sensepost/gowitness -e CGO_ENABLED=1 \
 	docker.elastic.co/beats-dev/golang-crossbuild:$(DOCKER_GO_VER)
@@ -28,6 +28,10 @@ darwin-arm:
 	GOOS=darwin GOARCH=arm64 go build $(LD_FLAGS) -o '$(BIN_DIR)/gowitness-$(APPVER)-darwin-arm64'
 linux:
 	GOOS=linux GOARCH=amd64 go build $(LD_FLAGS) -o '$(BIN_DIR)/gowitness-$(APPVER)-linux-amd64'
+linux-arm:
+	GOOS=linux GOARCH=arm64 go build $(LD_FLAGS) -o '$(BIN_DIR)/gowitness-$(APPVER)-linux-arm64'
+linux-armhf:
+	GOOS=linux GOARCH=arm GOARM=7 go build $(LD_FLAGS) -o '$(BIN_DIR)/gowitness-$(APPVER)-linux-armv7'
 windows:
 	GOOS=windows GOARCH=amd64 go build $(LD_FLAGS) -o '$(BIN_DIR)/gowitness-$(APPVER)-windows-amd64.exe'
 
@@ -39,6 +43,8 @@ darwin-release:
 	$(DOCKER_RELEASE_BUILD_CMD)-darwin-arm64-debian10 --build-cmd "make darwin-arm" -p "darwin/arm64"
 linux-release:
 	$(DOCKER_RELEASE_BUILD_CMD)-main --build-cmd "make linux" -p "linux/amd64"
+	$(DOCKER_RELEASE_BUILD_CMD)-arm --build-cmd "make linux-arm" -p "linux/arm64"
+	$(DOCKER_RELEASE_BUILD_CMD)-armhf --build-cmd "make linux-armhf" -p "linux/armv7"
 windows-release:
 	$(DOCKER_RELEASE_BUILD_CMD)-main --build-cmd "make windows" -p "windows/amd64"
 

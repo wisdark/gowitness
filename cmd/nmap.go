@@ -38,8 +38,8 @@ It is also possible to filter for services containing a specific string
 with the --service-contains / -w flag. Specifying -w flag as http means
 it would match services like http-alt, http-proxy etc.`,
 	Example: `# WARNING: These scan all exposed service, like SSH
-$ gowitness nmap --nmap-file nmap.xml
-$ gowitness nmap --nmap-file nmap.xml --scan-hostnames
+$ gowitness nmap --file nmap.xml
+$ gowitness nmap --file nmap.xml --scan-hostnames
 
 # These filter services from the nmap file
 $ gowitness nmap --file nmap.xml --service http --service https
@@ -49,7 +49,7 @@ $ gowitness nmap -f nmap.xml --no-http
 $ gowitness nmap -f nmap.xml --no-http --service https --port 8888
 $ gowitness nmap -f nmap.xml --no-https -n http -n http-alt
 $ gowitness nmap -f nmap.xml --port 80 --port 8080
-$ gowitness nmap --nmap-file nmap.xml -s -n http`,
+$ gowitness nmap --file nmap.xml -s -n http`,
 	Run: func(cmd *cobra.Command, args []string) {
 		log := options.Logger
 
@@ -118,7 +118,7 @@ func init() {
 	nmapCmd.Flags().StringSliceVarP(&options.NmapService, "service", "n", []string{}, "map service name filter. supports multiple --service flags")
 	nmapCmd.Flags().StringVarP(&options.NmapServiceContains, "service-contains", "w", "", "partial service name filter (aka: contains)")
 	nmapCmd.Flags().IntSliceVar(&options.NmapPorts, "port", []int{}, "ports filter. supports multiple --port flags")
-	nmapCmd.Flags().BoolVarP(&options.NmapScanHostanmes, "scan-hostnames", "N", false, "scan hostnames (useful for virtual hosting)")
+	nmapCmd.Flags().BoolVarP(&options.NmapScanHostnames, "scan-hostnames", "N", false, "scan hostnames (useful for virtual hosting)")
 	nmapCmd.Flags().BoolVarP(&options.NoHTTP, "no-http", "s", false, "do not try using http://")
 	nmapCmd.Flags().BoolVarP(&options.NoHTTPS, "no-https", "S", false, "do not try using https://")
 	nmapCmd.Flags().BoolVarP(&options.NmapOpenPortsOnly, "open", "", false, "only select open ports")
@@ -171,7 +171,7 @@ func getNmapURLs() (urls []string, err error) {
 				}
 
 				// add the hostnames if the option has been set
-				if options.NmapScanHostanmes {
+				if options.NmapScanHostnames {
 					for _, hn := range host.Hostnames {
 						urls = append(urls, buildURI(hn.Name, port.PortId)...)
 					}

@@ -21,6 +21,7 @@ type Options struct {
 	NoHTTPS    bool
 	NoHTTP     bool
 	ServerAddr string
+	BasePath   string
 
 	// Server command
 	AllowInsecureURIs bool
@@ -41,17 +42,17 @@ type Options struct {
 	ScreenshotFileName string
 
 	// Nessus
-	NessusPluginContains	[]string
-	NessusServiceNames		[]string
-	NessusPluginOutput		[]string
-	NessusPorts				[]int
+	NessusPluginContains []string
+	NessusServiceNames   []string
+	NessusPluginOutput   []string
+	NessusPorts          []int
 
 	// Nmap
 	NmapFile            string
 	NmapService         []string
 	NmapServiceContains string
 	NmapPorts           []int
-	NmapScanHostanmes   bool
+	NmapScanHostnames   bool
 	NmapOpenPortsOnly   bool
 
 	// Report List

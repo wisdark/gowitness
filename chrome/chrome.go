@@ -3,15 +3,18 @@ package chrome
 import (
 	"context"
 	"crypto/tls"
+	"errors"
+	"io"
 	"net/http"
 	"net/url"
 	"strings"
 	"time"
 
+	"github.com/chromedp/cdproto/inspector"
 	"github.com/chromedp/cdproto/network"
 	"github.com/chromedp/cdproto/page"
+	"github.com/chromedp/cdproto/runtime"
 	"github.com/chromedp/chromedp"
-	wappalyzer "github.com/projectdiscovery/wappalyzergo"
 	"github.com/sensepost/gowitness/storage"
 	"gorm.io/gorm"
 )
@@ -29,23 +32,64 @@ type Chrome struct {
 	Proxy       string
 	Headers     []string
 	HeadersMap  map[string]interface{}
+
+	// save screenies as PDF's instead
+	AsPDF bool
+
+	// wappalyzer client
+	wappalyzer *Wappalyzer
 }
 
-var wappalyzerClient *wappalyzer.Wappalyze
+type ConsoleLog struct {
+	URLID uint
 
-func InitWappalyzer() error {
-	var err error
-	wappalyzerClient, err = wappalyzer.New()
-	return err
+	Type  string
+	Value string
+}
+
+type NetworkLog struct {
+	URLID uint
+
+	RequestID   string
+	Time        time.Time
+	RequestType storage.RequestType
+	StatusCode  int64
+	URL         string
+	FinalURL    string // may differ from URL if there were redirects
+	IP          string
+	Error       string
+}
+
+// PreflightResult contains the results of a preflight run
+type PreflightResult struct {
+	URL              *url.URL
+	HTTPResponse     *http.Response
+	HTTPTitle        string
+	HTTPTechnologies []string
+}
+
+// ScreenshotResult contains the results of a screenshot
+type ScreenshotResult struct {
+	Screenshot []byte
+	DOM        string
+
+	// logging
+	ConsoleLog []ConsoleLog
+	NetworkLog []NetworkLog
 }
 
 // NewChrome returns a new initialised Chrome struct
 func NewChrome() *Chrome {
-	return &Chrome{}
+	return &Chrome{
+		wappalyzer: NewWappalyzer(),
+	}
 }
 
 // Preflight will preflight a url
-func (chrome *Chrome) Preflight(url *url.URL) (resp *http.Response, title string, technologies []string, err error) {
+func (chrome *Chrome) Preflight(url *url.URL) (result *PreflightResult, err error) {
+
+	// init a new preflight result
+	result = &PreflightResult{}
 
 	// purposefully ignore bad certs
 	transport := &http.Transport{
@@ -57,7 +101,7 @@ func (chrome *Chrome) Preflight(url *url.URL) (resp *http.Response, title string
 		var erri error
 		proxyURL, erri := url.Parse(chrome.Proxy)
 		if erri != nil {
-			return nil, "", nil, erri
+			return
 		}
 		transport.Proxy = http.ProxyURL(proxyURL)
 	}
@@ -84,50 +128,65 @@ func (chrome *Chrome) Preflight(url *url.URL) (resp *http.Response, title string
 	defer cancel()
 	req = req.WithContext(ctx)
 
-	resp, err = client.Do(req)
+	resp, err := client.Do(req)
 	if err != nil {
 		return
 	}
 
 	defer resp.Body.Close()
-	title, _ = GetHTMLTitle(resp.Body)
-	technologies, _ = GetTechnologies(resp)
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return
+	}
+
+	result.URL = url
+	result.HTTPResponse = resp
+
+	// if we cant perform wappalyzer lookups, then return
+	if chrome.wappalyzer.err != nil {
+		return
+	}
+
+	result.HTTPTitle = chrome.wappalyzer.HTMLTitle(body)
+	result.HTTPTechnologies = chrome.wappalyzer.Technologies(req.Header, body)
 
 	return
 }
 
-// StorePreflight will store preflight info to a DB
-func (chrome *Chrome) StorePreflight(url *url.URL, db *gorm.DB, resp *http.Response, title string, technologies []string, filename string) (uint, error) {
+// StoreRequest will store request info to the DB
+func (chrome *Chrome) StoreRequest(db *gorm.DB, preflight *PreflightResult, screenshot *ScreenshotResult, filename string) (uint, error) {
 
 	record := &storage.URL{
-		URL:            url.String(),
-		FinalURL:       resp.Request.URL.String(),
-		ResponseCode:   resp.StatusCode,
-		ResponseReason: resp.Status,
-		Proto:          resp.Proto,
-		ContentLength:  resp.ContentLength,
+		URL:            preflight.URL.String(),
+		DOM:            screenshot.DOM,
+		FinalURL:       preflight.HTTPResponse.Request.URL.String(),
+		ResponseCode:   preflight.HTTPResponse.StatusCode,
+		ResponseReason: preflight.HTTPResponse.Status,
+		Proto:          preflight.HTTPResponse.Proto,
+		ContentLength:  preflight.HTTPResponse.ContentLength,
+		Title:          preflight.HTTPTitle,
 		Filename:       filename,
-		Title:          title,
+		IsPDF:          chrome.AsPDF,
 	}
 
 	// append headers
-	for k, v := range resp.Header {
+	for k, v := range preflight.HTTPResponse.Header {
 		hv := strings.Join(v, ", ")
 		record.AddHeader(k, hv)
 	}
 
-	for _, v := range technologies {
+	for _, v := range preflight.HTTPTechnologies {
 		record.AddTechnologie(v)
 	}
 
 	// get TLS info, if any
-	if resp.TLS != nil {
+	if preflight.HTTPResponse.TLS != nil {
 		record.TLS = storage.TLS{
-			Version:    resp.TLS.Version,
-			ServerName: resp.TLS.ServerName,
+			Version:    preflight.HTTPResponse.TLS.Version,
+			ServerName: preflight.HTTPResponse.TLS.ServerName,
 		}
 
-		for _, cert := range resp.TLS.PeerCertificates {
+		for _, cert := range preflight.HTTPResponse.TLS.PeerCertificates {
 			tlsCert := &storage.TLSCertificate{
 				SubjectCommonName:  cert.Subject.CommonName,
 				IssuerCommonName:   cert.Issuer.CommonName,
@@ -143,14 +202,39 @@ func (chrome *Chrome) StorePreflight(url *url.URL, db *gorm.DB, resp *http.Respo
 		}
 	}
 
+	// add console logs
+	for _, log := range screenshot.ConsoleLog {
+		record.Console = append(record.Console, storage.ConsoleLog{
+			Type:  log.Type,
+			Value: log.Value,
+		})
+	}
+
+	// add network logs
+	for _, log := range screenshot.NetworkLog {
+		record.Network = append(record.Network, storage.NetworkLog{
+			RequestID:   log.RequestID,
+			Time:        log.Time,
+			RequestType: log.RequestType,
+			StatusCode:  log.StatusCode,
+			URL:         log.URL,
+			FinalURL:    log.FinalURL,
+			IP:          log.IP,
+			Error:       log.Error,
+		})
+	}
+
 	db.Create(record)
 	return record.ID, nil
 }
 
-// Screenshot takes a screenshot of a URL and saves it to destination
+// Screenshot takes a screenshot of a URL, optionally saving network and console events.
 // Ref:
 // 	https://github.com/chromedp/examples/blob/255873ca0d76b00e0af8a951a689df3eb4f224c3/screenshot/main.go
-func (chrome *Chrome) Screenshot(url *url.URL) ([]byte, error) {
+func (chrome *Chrome) Screenshot(url *url.URL) (result *ScreenshotResult, err error) {
+
+	// prepare a new screenshotResult
+	result = &ScreenshotResult{}
 
 	// setup chromedp default options
 	options := []chromedp.ExecAllocatorOption{}
@@ -169,75 +253,212 @@ func (chrome *Chrome) Screenshot(url *url.URL) ([]byte, error) {
 	}
 
 	actx, acancel := chromedp.NewExecAllocator(context.Background(), options...)
-	ctx, cancel := chromedp.NewContext(actx)
 	defer acancel()
-	defer cancel()
+	browserCtx, cancelBrowserCtx := chromedp.NewContext(actx)
+	defer cancelBrowserCtx()
 
-	var buf []byte
+	// create the initial context to act as the 'tab', where we will perform the initial navigation
+	// if this context loads successfully, then the screenshot will have been captured
+	//
+	//		Note:	You're not supposed to delay the initial run context, so we use WithTimeout
+	//				 https://pkg.go.dev/github.com/chromedp/chromedp#Run
+
+	tabCtx, cancelTabCtx := context.WithTimeout(browserCtx, time.Duration(chrome.Timeout)*time.Second)
+	defer cancelTabCtx()
+
+	// Run the initial browser
+	if err := chromedp.Run(browserCtx); err != nil {
+		return nil, err
+	}
+
+	// prevent browser crashes from locking the context (prevents hanging)
+	chromedp.ListenTarget(browserCtx, func(ev interface{}) {
+		if _, ok := ev.(*inspector.EventTargetCrashed); ok {
+			cancelBrowserCtx()
+		}
+	})
+
+	chromedp.ListenTarget(tabCtx, func(ev interface{}) {
+		if _, ok := ev.(*inspector.EventTargetCrashed); ok {
+			cancelTabCtx()
+		}
+	})
 
 	// squash JavaScript dialog boxes such as alert();
-	chromedp.ListenTarget(ctx, func(ev interface{}) {
+	chromedp.ListenTarget(tabCtx, func(ev interface{}) {
 		if _, ok := ev.(*page.EventJavascriptDialogOpening); ok {
 			go func() {
-				if err := chromedp.Run(ctx,
+				if err := chromedp.Run(tabCtx,
 					page.HandleJavaScriptDialog(true),
 				); err != nil {
-					panic(err)
+					cancelTabCtx()
 				}
 			}()
 		}
 	})
 
-	if chrome.FullPage {
-		// straight from: https://github.com/chromedp/examples/blob/849108f7da9f743bcdaef449699ed57cb4053379/screenshot/main.go
+	// log console.* events, as well as any thrown exceptions
+	chromedp.ListenTarget(tabCtx, func(ev interface{}) {
+		switch ev := ev.(type) {
+		case *runtime.EventConsoleAPICalled:
 
-		// additional headers
-		if len(chrome.HeadersMap) > 0 {
-			if err := chromedp.Run(ctx, chromedp.Tasks{
-				network.Enable(),
-				network.SetExtraHTTPHeaders(network.Headers(chrome.HeadersMap)),
-				chromedp.Navigate(url.String()),
-				chromedp.Sleep(time.Duration(chrome.Delay) * time.Second),
-				chromedp.FullScreenshot(&buf, 100),
-			}); err != nil {
-				return nil, err
+			// use a buffer to read each arg passed to the console.* call
+			buf := ""
+			for _, arg := range ev.Args {
+				buf += string(arg.Value)
 			}
-		} else {
-			if err := chromedp.Run(ctx, chromedp.Tasks{
-				chromedp.Navigate(url.String()),
-				chromedp.Sleep(time.Duration(chrome.Delay) * time.Second),
-				chromedp.FullScreenshot(&buf, 100),
-			}); err != nil {
-				return nil, err
+
+			result.ConsoleLog = append(result.ConsoleLog, ConsoleLog{
+				Type:  "console." + string(ev.Type),
+				Value: buf,
+			})
+
+		case *runtime.EventExceptionThrown:
+			result.ConsoleLog = append(result.ConsoleLog, ConsoleLog{
+				Type:  "exception",
+				Value: ev.ExceptionDetails.Error(),
+			})
+		}
+	})
+
+	// keep a keyed reference so we can map network logs to requestid's and
+	// update them as responses are received
+	networkLog := make(map[string]NetworkLog)
+
+	// log network events
+	chromedp.ListenTarget(tabCtx, func(ev interface{}) {
+		switch ev := ev.(type) {
+		// http
+		case *network.EventRequestWillBeSent:
+			// record a fresh request that will be sent
+			networkLog[string(ev.RequestID)] = NetworkLog{
+				RequestID:   string(ev.RequestID),
+				Time:        time.Time(*ev.Timestamp),
+				RequestType: storage.HTTP,
+				URL:         ev.Request.URL,
+			}
+		case *network.EventResponseReceived:
+			// update the networkLog map with updated information about response
+			if entry, ok := networkLog[string(ev.RequestID)]; ok {
+				entry.StatusCode = ev.Response.Status
+				entry.FinalURL = ev.Response.URL
+				entry.IP = ev.Response.RemoteIPAddress
+
+				networkLog[string(ev.RequestID)] = entry
+			}
+		case *network.EventLoadingFailed:
+			// update the network map with the error experienced
+			if entry, ok := networkLog[string(ev.RequestID)]; ok {
+				entry.Error = ev.ErrorText
+
+				networkLog[string(ev.RequestID)] = entry
+			}
+		// websockets
+		case *network.EventWebSocketCreated:
+			networkLog[string(ev.RequestID)] = NetworkLog{
+				RequestID:   string(ev.RequestID),
+				RequestType: storage.WS,
+				URL:         ev.URL,
+			}
+		case *network.EventWebSocketHandshakeResponseReceived:
+			if entry, ok := networkLog[string(ev.RequestID)]; ok {
+				entry.StatusCode = ev.Response.Status
+				entry.Time = time.Time(*ev.Timestamp)
+
+				networkLog[string(ev.RequestID)] = entry
+			}
+		case *network.EventWebSocketFrameError:
+			if entry, ok := networkLog[string(ev.RequestID)]; ok {
+				entry.Error = ev.ErrorMessage
+
+				networkLog[string(ev.RequestID)] = entry
 			}
 		}
+	})
 
-	} else {
-		// normal viewport screenshot
+	// perform navigation on the tab context and attempt to take a clean screenshot
+	err = chromedp.Run(tabCtx, buildTasks(chrome, url, true, &result.Screenshot, &result.DOM))
 
-		// additional headers
-		if len(chrome.HeadersMap) > 0 {
-			if err := chromedp.Run(ctx, chromedp.Tasks{
-				network.Enable(),
-				network.SetExtraHTTPHeaders(network.Headers(chrome.HeadersMap)),
-				chromedp.Navigate(url.String()),
-				chromedp.Sleep(time.Duration(chrome.Delay) * time.Second),
-				chromedp.CaptureScreenshot(&buf),
-			}); err != nil {
-				return nil, err
+	if errors.Is(err, context.DeadlineExceeded) {
+		// if the context timeout exceeded (e.g. on a long page load) then
+		// just take the screenshot this will take a screenshot of whatever
+		// loaded before failing
+
+		// create a new tab context for this scenario, since our previous
+		// context expired using a context timeout delay again to help
+		// prevent hanging scenarios
+		newTabCtx, cancelNewTabCtx := context.WithTimeout(browserCtx, time.Duration(chrome.Timeout)*time.Second)
+		defer cancelNewTabCtx()
+
+		// listen for crashes on this backup context as well
+		chromedp.ListenTarget(newTabCtx, func(ev interface{}) {
+			if _, ok := ev.(*inspector.EventTargetCrashed); ok {
+				cancelNewTabCtx()
 			}
-		} else {
-			if err := chromedp.Run(ctx, chromedp.Tasks{
-				chromedp.Navigate(url.String()),
-				chromedp.Sleep(time.Duration(chrome.Delay) * time.Second),
-				chromedp.CaptureScreenshot(&buf),
-			}); err != nil {
-				return nil, err
-			}
-		}
+		})
+
+		// attempt to capture the screenshot of the tab and replace error accordingly
+		err = chromedp.Run(newTabCtx, buildTasks(chrome, url, false, &result.Screenshot, &result.DOM))
 	}
 
-	return buf, nil
+	if err != nil {
+		return nil, err
+	}
+
+	// close the tab so that we dont receive more network events
+	cancelTabCtx()
+
+	// append the networklog
+	for _, log := range networkLog {
+		result.NetworkLog = append(result.NetworkLog, log)
+	}
+
+	return result, nil
+}
+
+// buildTasks builds the chromedp tasks slice
+func buildTasks(chrome *Chrome, url *url.URL, doNavigate bool, buf *[]byte, dom *string) chromedp.Tasks {
+	var actions chromedp.Tasks
+
+	if len(chrome.HeadersMap) > 0 {
+		actions = append(actions, network.Enable(), network.SetExtraHTTPHeaders(network.Headers(chrome.HeadersMap)))
+	}
+
+	if doNavigate {
+		actions = append(actions, chromedp.Navigate(url.String()))
+		if chrome.Delay > 0 {
+			actions = append(actions, chromedp.Sleep(time.Duration(chrome.Delay)*time.Second))
+		}
+		actions = append(actions, chromedp.Stop())
+	}
+
+	// add a small sleep to wait for images and other things
+	actions = append(actions, chromedp.Sleep(time.Second*3))
+
+	// grab the dom
+	actions = append(actions, chromedp.OuterHTML(":root", dom, chromedp.ByQueryAll))
+
+	// should we print as pdf?
+	if chrome.AsPDF {
+		actions = append(actions, chromedp.ActionFunc(func(ctx context.Context) error {
+			var err error
+			*buf, _, err = page.PrintToPDF().
+				WithDisplayHeaderFooter(true).
+				Do(ctx)
+			return err
+		}))
+
+		return actions
+	}
+
+	// otherwise screenshot as png
+	if chrome.FullPage {
+		actions = append(actions, chromedp.FullScreenshot(buf, 100))
+	} else {
+		actions = append(actions, chromedp.CaptureScreenshot(buf))
+	}
+
+	return actions
 }
 
 // initalize the headers Map. we do this given the format chromedp wants

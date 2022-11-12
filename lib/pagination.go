@@ -22,19 +22,12 @@ type PaginationPage struct {
 	Ordered       bool
 }
 
-// Filter describes a column filter
-type Filter struct {
-	Column string
-	Value  string
-}
-
 // Pagination has options for a Page
 type Pagination struct {
 	DB       *gorm.DB
 	CurrPage int
 	Limit    int
 	OrderBy  []string
-	FilterBy []Filter
 }
 
 // Page pages a dataset
@@ -50,7 +43,7 @@ func (p *Pagination) Page(data interface{}) (*PaginationPage, error) {
 		p.CurrPage = 1
 	}
 	if p.Limit == 0 {
-		p.Limit = 21
+		p.Limit = 66
 	}
 	if len(p.OrderBy) > 0 {
 		for _, order := range p.OrderBy {
@@ -59,12 +52,6 @@ func (p *Pagination) Page(data interface{}) (*PaginationPage, error) {
 		pagination.Ordered = true
 	} else {
 		pagination.Ordered = false
-	}
-
-	if len(p.FilterBy) > 0 {
-		for _, filter := range p.FilterBy {
-			db = db.Where(filter.Column+" LIKE ?", "%"+filter.Value+"%")
-		}
 	}
 
 	db.Model(data).Count(&count)
@@ -100,8 +87,20 @@ func (p *Pagination) Page(data interface{}) (*PaginationPage, error) {
 		pagination.NextPage = p.CurrPage + 1
 	}
 
-	pagination.PrevPageRange = makeSizedRange(1, pagination.NextPage-2, 5)
-	pagination.NextPageRange = makeSizedRange(pagination.NextPage, pagination.Pages, 5)
+	pagination.PrevPageRange = makeSizedRange(1, pagination.PrevPage, 5)
+
+	// ceil if we are in front
+	if pagination.Page == 1 {
+		pagination.PrevPageRange = []int{}
+	}
+
+	// wrap if we reach the end
+	if pagination.Page == pagination.Pages {
+		pagination.NextPage = 1
+		pagination.NextPageRange = []int{}
+	} else {
+		pagination.NextPageRange = makeSizedRange(pagination.NextPage, pagination.Pages, 5)
+	}
 
 	return &pagination, nil
 }
