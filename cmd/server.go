@@ -4,9 +4,9 @@ import (
 	"fmt"
 	"html/template"
 	"io/fs"
-	"io/ioutil"
 	"net/http"
 	"net/url"
+	"os"
 	"strconv"
 	"strings"
 
@@ -28,7 +28,7 @@ var serverCmd = &cobra.Command{
 	Short: "Starts a webserver that serves the report interface, api and screenshot tool",
 	Long: `Starts a webserver that serves the report interface, api and screenshot tool.
 
-The report server is availabe in the root path, aka /.
+The report server is available in the root path, aka /.
 The API is available from the /api path.
 
 The global database and screenshot paths should be set to the same as
@@ -69,7 +69,7 @@ $ gowitness server --address 127.0.0.1:9000 --allow-insecure-uri`,
 		}
 		rsDB = dbh
 
-		log.Info().Str("path", db.Path).Msg("db path")
+		log.Info().Str("path", db.Location).Msg("db path")
 		log.Info().Str("path", options.ScreenshotPath).Msg("screenshot path")
 
 		if options.Debug {
@@ -125,6 +125,7 @@ $ gowitness server --address 127.0.0.1:9000 --allow-insecure-uri`,
 		api := r.Group("/api")
 		{
 			api.GET("/list", apiURLHandler)
+			api.GET("/search", apiSearchHandler)
 			api.GET("/detail/:id", apiDetailHandler)
 			api.GET("/detail/:id/screenshot", apiDetailScreenshotHandler)
 			api.POST("/screenshot", apiScreenshotHandler)
@@ -198,9 +199,6 @@ func themeChooser(choice *string) gin.HandlerFunc {
 			d := "dark"
 			*choice = d
 		}
-
-		// no change with an invalid value
-		return
 	}
 }
 
@@ -301,7 +299,7 @@ func submitHandler(c *gin.Context) {
 		}
 	}
 
-	if err := ioutil.WriteFile(fp, result.Screenshot, 0644); err != nil {
+	if err := os.WriteFile(fp, result.Screenshot, 0644); err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{
 			"status":  "error",
 			"message": err.Error(),
@@ -556,6 +554,32 @@ func apiURLHandler(c *gin.Context) {
 	c.JSON(http.StatusOK, urls)
 }
 
+// apiSearchHandler allows for searches via the api
+func apiSearchHandler(c *gin.Context) {
+
+	query := c.Query("q")
+
+	if query == "" {
+		c.JSON(http.StatusNotAcceptable, gin.H{
+			"status": "error",
+			"error":  "search parameter 'q' empty",
+		})
+		return
+	}
+
+	// use gorm SmartSelect Fields to filter URL
+	search := "%" + query + "%"
+	var urls []storage.URL
+
+	rsDB.
+		Where("URL LIKE ?", search).
+		Or("Title LIKE ?", search).
+		Or("DOM LIKE ?", search).
+		Find(&urls)
+
+	c.JSON(http.StatusOK, urls)
+}
+
 // apiDetailHandler handles a detail request for screenshot information
 func apiDetailHandler(c *gin.Context) {
 
@@ -590,7 +614,7 @@ func apiDetailScreenshotHandler(c *gin.Context) {
 
 	p := options.ScreenshotPath + "/" + url.Filename
 
-	screenshot, err := ioutil.ReadFile(p)
+	screenshot, err := os.ReadFile(p)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{
 			"stauts": "errir",

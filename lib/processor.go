@@ -3,8 +3,8 @@ package lib
 import (
 	"bytes"
 	"image/png"
-	"io/ioutil"
 	"net/url"
+	"os"
 
 	"github.com/corona10/goimagehash"
 	"github.com/rs/zerolog"
@@ -38,17 +38,28 @@ type Processor struct {
 }
 
 // Gowitness processes a URL by:
-//	- preflighting
-//	- storing
-//	- screenshotting
-//	- calculating a perception hash
-//	- writing a screenshot to disk
+//   - preflighting
+//   - storing
+//   - screenshotting
+//   - calculating a perception hash
+//   - writing a screenshot to disk
 func (p *Processor) Gowitness() (err error) {
 
 	p.init()
 
 	if err = p.preflight(); err != nil {
 		log.Error().Err(err).Msg("preflight request failed")
+		return
+	}
+
+	// check if the preflight returned a code to process.
+	// an empty slice implies no filtering
+	if (len(p.Chrome.ScreenshotCodes) > 0) &&
+		!SliceContainsInt(p.Chrome.ScreenshotCodes, p.preflightResult.HTTPResponse.StatusCode) {
+
+		log.Warn().Int("response-code", p.preflightResult.HTTPResponse.StatusCode).
+			Msg("response code not in allowed screenshot http response codes. skipping.")
+
 		return
 	}
 
@@ -75,6 +86,15 @@ func (p *Processor) Gowitness() (err error) {
 	return
 }
 
+// adds the file extension to a given path if the path does not end with the given extension
+func addExtensionIfNeeded(filepath, extension string) string {
+	ext := filepath[len(filepath)-len(extension):]
+	if ext != extension {
+		return filepath[:] + extension
+	}
+	return filepath
+}
+
 // init initialises the Processor
 func (p *Processor) init() {
 	if p.ScreenshotFileName != "" {
@@ -88,9 +108,9 @@ func (p *Processor) init() {
 
 	// set the extention depending on the screenshot format
 	if p.Chrome.AsPDF {
-		p.fn = p.fn + ".pdf"
+		p.fn = addExtensionIfNeeded(p.fn, ".pdf")
 	} else {
-		p.fn = p.fn + ".png"
+		p.fn = addExtensionIfNeeded(p.fn, ".png")
 	}
 
 	p.fp = ScreenshotPath(p.fn, p.URL, p.ScreenshotPath)
@@ -179,7 +199,7 @@ func (p *Processor) storePerceptionHash() (err error) {
 func (p *Processor) writeScreenshot() (err error) {
 
 	p.Logger.Debug().Str("url", p.URL.String()).Str("path", p.fp).Msg("saving screenshot buffer")
-	if err = ioutil.WriteFile(p.fp, p.screenshotResult.Screenshot, 0644); err != nil {
+	if err = os.WriteFile(p.fp, p.screenshotResult.Screenshot, 0644); err != nil {
 		return
 	}
 

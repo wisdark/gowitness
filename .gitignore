@@ -4,7 +4,6 @@
 *.so
 *.dylib
 *.sqlite3
-
 # dep vendor/
 vendor/
 
@@ -23,3 +22,4 @@ screenshots/
 # Project-local glide cache, RE: https://github.com/Masterminds/glide/issues/736
 .glide/
 .DS_Store
+.idea/

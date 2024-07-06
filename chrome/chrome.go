@@ -3,6 +3,7 @@ package chrome
 import (
 	"context"
 	"crypto/tls"
+	"encoding/base64"
 	"errors"
 	"io"
 	"net/http"
@@ -25,6 +26,7 @@ type Chrome struct {
 	ResolutionX int
 	ResolutionY int
 	UserAgent   string
+	JsCode      string
 	Timeout     int64
 	Delay       int
 	FullPage    bool
@@ -33,8 +35,13 @@ type Chrome struct {
 	Headers     []string
 	HeadersMap  map[string]interface{}
 
+	// http codes to screenshot (used as a filter)
+	ScreenshotCodes []int
+
 	// save screenies as PDF's instead
 	AsPDF bool
+	// save screenies in db
+	ScreenshotDbStore bool
 
 	// wappalyzer client
 	wappalyzer *Wappalyzer
@@ -169,6 +176,11 @@ func (chrome *Chrome) StoreRequest(db *gorm.DB, preflight *PreflightResult, scre
 		IsPDF:          chrome.AsPDF,
 	}
 
+	// if screenshots need to be saved to the database, do that.
+	if chrome.ScreenshotDbStore {
+		record.Screenshot = base64.StdEncoding.EncodeToString(screenshot.Screenshot)
+	}
+
 	// append headers
 	for k, v := range preflight.HTTPResponse.Header {
 		hv := strings.Join(v, ", ")
@@ -230,7 +242,8 @@ func (chrome *Chrome) StoreRequest(db *gorm.DB, preflight *PreflightResult, scre
 
 // Screenshot takes a screenshot of a URL, optionally saving network and console events.
 // Ref:
-// 	https://github.com/chromedp/examples/blob/255873ca0d76b00e0af8a951a689df3eb4f224c3/screenshot/main.go
+//
+//	https://github.com/chromedp/examples/blob/255873ca0d76b00e0af8a951a689df3eb4f224c3/screenshot/main.go
 func (chrome *Chrome) Screenshot(url *url.URL) (result *ScreenshotResult, err error) {
 
 	// prepare a new screenshotResult
@@ -426,6 +439,9 @@ func buildTasks(chrome *Chrome, url *url.URL, doNavigate bool, buf *[]byte, dom 
 
 	if doNavigate {
 		actions = append(actions, chromedp.Navigate(url.String()))
+		if len(chrome.JsCode) > 0 {
+			actions = append(actions, chromedp.Evaluate(chrome.JsCode, nil))
+		}
 		if chrome.Delay > 0 {
 			actions = append(actions, chromedp.Sleep(time.Duration(chrome.Delay)*time.Second))
 		}
@@ -463,7 +479,8 @@ func buildTasks(chrome *Chrome, url *url.URL, doNavigate bool, buf *[]byte, dom 
 
 // initalize the headers Map. we do this given the format chromedp wants
 // Ref:
-// 	https://github.com/chromedp/examples/blob/master/headers/main.go
+//
+//	https://github.com/chromedp/examples/blob/master/headers/main.go
 func (chrome *Chrome) PrepareHeaderMap() {
 
 	if len(chrome.Headers) <= 0 {
