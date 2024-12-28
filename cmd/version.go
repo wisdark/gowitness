@@ -3,31 +3,19 @@ package cmd
 import (
 	"fmt"
 
+	"github.com/sensepost/gowitness/internal/ascii"
+	"github.com/sensepost/gowitness/internal/version"
 	"github.com/spf13/cobra"
 )
 
-var (
-	version = "2.5.1"
-
-	gitHash string
-	goVer   string
-)
-
-// versionCmd represents the version command
 var versionCmd = &cobra.Command{
 	Use:   "version",
-	Short: "Prints the version of gowitness",
+	Short: "Get the gowitness version",
+	Long:  ascii.LogoHelp(`Get the gowitness version.`),
 	Run: func(cmd *cobra.Command, args []string) {
-		if gitHash == "" {
-			gitHash = "dev"
-		}
-
-		if goVer == "" {
-			goVer = "dev"
-		}
-
-		fmt.Printf("gowitness: %s\n", version)
-		fmt.Printf("\ngit hash: %s\ngo version: %s\n", gitHash, goVer)
+		fmt.Println(ascii.Logo())
+		fmt.Printf("\ngowitness: %s\ngit hash: %s\nbuild env: %s\nbuild time: %s\n",
+			version.Version, version.GitHash, version.GoBuildEnv, version.GoBuildTime)
 	},
 }
 

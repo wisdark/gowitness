@@ -4,7 +4,7 @@ services:
   gowitness:
     image: ghcr.io/sensepost/gowitness:latest
     restart: unless-stopped
-    command: gowitness server --address 0.0.0.0:7171
+    command: gowitness report server --host 0.0.0.0 --screenshot-path /data/screenshots --db-uri sqlite:///data/gowitness.sqlite3
     volumes:
       - ./gowitness.sqlite3:/data/gowitness.sqlite3
       - ./screenshots:/data/screenshots
@@ -16,7 +16,7 @@ services:
       traefik.http.routers.gowitness.middlewares: basic-auth
 
   traefik:
-    image: traefik:2.7
+    image: traefik:3.1
     restart: unless-stopped
     command:
       - --log.level=INFO
@@ -34,7 +34,7 @@ services:
       # consider using something like trauth[1] to manage it.
       # [1] https://github.com/leonjza/trauth
       #
-      # example credentials here:
+      # example credentials here are:
       #   gowitness:gowitness
       # use `htpasswd` to get a hash for a different password. also note you need to escape $ with another $ to $$'s
       traefik.http.middlewares.basic-auth.basicauth.users: gowitness:$$2y$$05$$7ADiPfM1kMABSUjofyUTOuJ7U6RcGi5fXeecyYnxjYwRluRRIO1..

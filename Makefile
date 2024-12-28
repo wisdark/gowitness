@@ -1,57 +1,55 @@
-# ref: https://vic.demuzere.be/articles/golang-makefile-crosscompile/
-
 G := $(shell go version | cut -d' ' -f 3,4 | sed 's/ /_/g')
 V := $(shell git rev-parse --short HEAD)
-APPVER := $(shell grep 'version =' cmd/version.go | cut -d \" -f2)
+APPVER := $(shell grep 'Version =' internal/version/version.go | cut -d \" -f2)
 PWD := $(shell pwd)
-LD_FLAGS := -ldflags="-s -w -X=github.com/sensepost/gowitness/cmd.gitHash=$(V) -X=github.com/sensepost/gowitness/cmd.goVer=$(G)"
+GOPATH := $(shell go env GOPATH)
+BUILD_TIME := $(shell date -u +"%Y-%m-%dT%H:%M:%SZ")
+LD_FLAGS := -trimpath \
+	-ldflags="-s -w \
+	-X=github.com/sensepost/gowitness/internal/version.GitHash=$(V) \
+	-X=github.com/sensepost/gowitness/internal/version.GoBuildEnv=$(G) \
+	-X=github.com/sensepost/gowitness/internal/version.GoBuildTime=$(BUILD_TIME)"
 BIN_DIR := build
-DOCKER_GO_VER := 1.22.4# https://github.com/elastic/golang-crossbuild
-DOCKER_RELEASE_BUILD_CMD := docker run --rm -it -v $(PWD):/go/src/github.com/sensepost/gowitness \
-	-w /go/src/github.com/sensepost/gowitness -e CGO_ENABLED=1 \
-	docker.elastic.co/beats-dev/golang-crossbuild:$(DOCKER_GO_VER)
+PLATFORMS := darwin/amd64 darwin/arm64 linux/amd64 linux/arm64 linux/arm windows/amd64 windows/arm64
+CGO := CGO_ENABLED=0
 
-export CGO_ENABLED=1
+# Default target
+default: clean test frontend api-doc build integrity
 
-default: clean darwin linux windows integrity
-
+# Clean up build artifacts
 clean:
-	$(RM) $(BIN_DIR)/gowitness*
+	find $(BIN_DIR) -type f -name 'gowitness-*' -delete
 	go clean -x
 
-install:
-	go install
+# Build frontend
+frontend: check-npm
+	@echo "Building frontend..."
+	cd web/ui && npm i && npm run build
 
-darwin:
-	GOOS=darwin GOARCH=amd64 go build $(LD_FLAGS) -o '$(BIN_DIR)/gowitness-$(APPVER)-darwin-amd64'
-darwin-arm:
-	GOOS=darwin GOARCH=arm64 go build $(LD_FLAGS) -o '$(BIN_DIR)/gowitness-$(APPVER)-darwin-arm64'
-linux:
-	GOOS=linux GOARCH=amd64 go build $(LD_FLAGS) -o '$(BIN_DIR)/gowitness-$(APPVER)-linux-amd64'
-linux-arm:
-	GOOS=linux GOARCH=arm64 go build $(LD_FLAGS) -o '$(BIN_DIR)/gowitness-$(APPVER)-linux-arm64'
-linux-armhf:
-	GOOS=linux GOARCH=arm GOARM=7 go build $(LD_FLAGS) -o '$(BIN_DIR)/gowitness-$(APPVER)-linux-armv7'
-windows:
-	GOOS=windows GOARCH=amd64 go build $(LD_FLAGS) -o '$(BIN_DIR)/gowitness-$(APPVER)-windows-amd64.exe'
+# Check if npm is installed
+check-npm:
+	@command -v npm >/dev/null 2>&1 || { echo >&2 "npm is not installed. Please install npm first."; exit 1; }
 
-# release
-release: clean darwin-release linux-release windows-release integrity
+# Generate a swagger.json used for the api documentation
+api-doc:
+	go install github.com/swaggo/swag/cmd/swag@latest
+	$(GOPATH)/bin/swag i --exclude ./web/ui --output web/docs
+	$(GOPATH)/bin/swag f
 
-darwin-release:
-	$(DOCKER_RELEASE_BUILD_CMD)-darwin-debian10 --build-cmd "make darwin" -p "darwin/amd64"
-	$(DOCKER_RELEASE_BUILD_CMD)-darwin-arm64-debian10 --build-cmd "make darwin-arm" -p "darwin/arm64"
-linux-release:
-	$(DOCKER_RELEASE_BUILD_CMD)-main --build-cmd "make linux" -p "linux/amd64"
-	$(DOCKER_RELEASE_BUILD_CMD)-arm --build-cmd "make linux-arm" -p "linux/arm64"
-	$(DOCKER_RELEASE_BUILD_CMD)-armhf --build-cmd "make linux-armhf" -p "linux/armv7"
-windows-release:
-	$(DOCKER_RELEASE_BUILD_CMD)-main --build-cmd "make windows" -p "windows/amd64"
+# Run any tests
+test:
+	@echo "Running tests..."
+	go test ./...
 
-docker:
-	go build $(LD_FLAGS) -o gowitness
-docker-image:
-	docker build -t gowitness:local .
+# Build for all platforms
+build: $(PLATFORMS)
 
+# Generic build target for platforms
+$(PLATFORMS):
+	$(eval GOOS=$(firstword $(subst /, ,$@)))
+	$(eval GOARCH=$(lastword $(subst /, ,$@)))
+	$(CGO) GOOS=$(GOOS) GOARCH=$(GOARCH) go build $(LD_FLAGS) -o '$(BIN_DIR)/gowitness-$(APPVER)-$(GOOS)-$(GOARCH)$(if $(filter windows,$(GOOS)),.exe)'
+
+# Checksum integrity
 integrity:
 	cd $(BIN_DIR) && shasum *

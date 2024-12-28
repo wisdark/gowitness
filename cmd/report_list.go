@@ -1,114 +1,193 @@
 package cmd
 
 import (
-	"encoding/csv"
+	"bufio"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io"
 	"os"
-	"strconv"
 
-	"github.com/olekukonko/tablewriter"
-	"github.com/sensepost/gowitness/storage"
+	"github.com/charmbracelet/lipgloss"
+	"github.com/charmbracelet/lipgloss/table"
+	"github.com/charmbracelet/x/term"
+	"github.com/sensepost/gowitness/internal/ascii"
+	"github.com/sensepost/gowitness/pkg/database"
+	"github.com/sensepost/gowitness/pkg/log"
+	"github.com/sensepost/gowitness/pkg/models"
 	"github.com/spf13/cobra"
+	"gorm.io/gorm/clause"
 )
 
-// reportListCmd represents the reportList command
-var reportListCmd = &cobra.Command{
+var listCmdFlags = struct {
+	DbURI    string
+	JsonFile string
+}{}
+var listCmd = &cobra.Command{
 	Use:   "list",
-	Short: "List entries in the gowitness database in various formats",
-	Long: `List entries in the gowitness database in various formats.
+	Short: "List a summary of results from a data source",
+	Long: ascii.LogoHelp(ascii.Markdown(`
+# report list
 
-Export formats include CSV (via the --csv / -c flag) as well as JSON (via
-the --json / -j flag).
-
-When using the JSON format you could chain the results with an invocation of
-[1]jq to further filter the data. For example, to get only URL's for which
-the status code was an HTTP 200:
-
-gowitness report list -j | jq -r ". | select(.response_code==200) | .final_url"
-
-[1] https://stedolan.github.io/jq/`,
-	Example: `$ gowitness report list
-$ gowitness report list --json
-$ gowitness report list --csv --sort`,
+List a summary of results from a data source, like an SQLite database or a JSON
+lines file.`)),
+	PreRunE: func(cmd *cobra.Command, args []string) error {
+		if listCmdFlags.DbURI == "" && listCmdFlags.JsonFile == "" {
+			return errors.New("no data source defined")
+		}
+		return nil
+	},
 	Run: func(cmd *cobra.Command, args []string) {
-		log := options.Logger
+		var results = []*models.Result{}
 
-		db, err := db.Get()
-		if err != nil {
-			log.Fatal().Err(err).Msg("failed to get a db handle")
-		}
-
-		rows, err := db.Scopes(storage.OrderPerception(options.PerceptionSort)).
-			Model(&storage.URL{}).Rows()
-		if err != nil {
-			log.Fatal().Err(err).Msg("failed to get rows")
-		}
-		defer rows.Close()
-
-		var data []storage.URL
-		for rows.Next() {
-			url := &storage.URL{}
-			db.ScanRows(rows, url)
-			data = append(data, *url)
-		}
-
-		if options.ReportJSON {
-			if err := outputJSON(&data); err != nil {
-				log.Fatal().Err(err).Msg("failed to output json")
+		// if we have a json path, use that
+		if listCmdFlags.JsonFile != "" {
+			file, err := os.Open(listCmdFlags.JsonFile)
+			if err != nil {
+				log.Error("could not open JSON Lines file", "err", err)
+				return
 			}
+			defer file.Close()
+
+			reader := bufio.NewReader(file)
+			for {
+				line, err := reader.ReadBytes('\n')
+				if err != nil {
+					if err == io.EOF {
+						if len(line) == 0 {
+							break // End of file
+						}
+						// Handle the last line without '\n'
+					} else {
+						log.Error("error reading JSON Lines file", "err", err)
+						return
+					}
+				}
+
+				var result models.Result
+				if err := json.Unmarshal(line, &result); err != nil {
+					log.Error("could not unmarshal JSON line", "err", err)
+					continue
+				}
+				results = append(results, &result)
+
+				if err == io.EOF {
+					break
+				}
+			}
+
+			renderTable(results)
 			return
 		}
 
-		if options.ReportCSV {
-			outputCSV(&data)
+		// db-uri is the default
+		conn, err := database.Connection(listCmdFlags.DbURI, true, false)
+		if err != nil {
+			log.Error("could not connect to database", "err", err)
 			return
 		}
 
-		outputTable(&data)
+		if err := conn.Model(&models.Result{}).Preload(clause.Associations).Find(&results).Error; err != nil {
+			log.Error("could not get list", "err", err)
+			return
+		}
+
+		renderTable(results)
 	},
 }
 
 func init() {
-	reportCmd.AddCommand(reportListCmd)
+	reportCmd.AddCommand(listCmd)
 
-	reportListCmd.Flags().BoolVarP(&options.ReportJSON, "json", "j", false, "output json")
-	reportListCmd.Flags().BoolVarP(&options.ReportCSV, "csv", "c", false, "output csv")
-	reportListCmd.Flags().BoolVarP(&options.PerceptionSort, "sort", "S", false, "sort by image perceptions")
+	listCmd.Flags().StringVar(&listCmdFlags.DbURI, "db-uri", "sqlite://gowitness.sqlite3", "The location of a gowitness database")
+	listCmd.Flags().StringVar(&listCmdFlags.JsonFile, "json-file", "", "The location of a JSON Lines results file (e.g., ./gowitness.jsonl). This flag takes precedence over --db-uri")
 }
 
-// outputJSON prints the report in JSON format
-func outputJSON(d *[]storage.URL) error {
+func renderTable(results []*models.Result) {
+	PaddedStyle := lipgloss.NewStyle().PaddingLeft(1).PaddingRight(1)
+	HeaderStyle := PaddedStyle.Bold(true).Underline(true)
+	RowStyle := PaddedStyle
 
-	for _, l := range *d {
-		bytes, err := json.Marshal(l)
-		if err != nil {
-			return err
-		}
-		fmt.Print(string(bytes))
+	t := table.New().
+		Border(lipgloss.RoundedBorder()).
+		BorderStyle(lipgloss.NewStyle().Foreground(lipgloss.Color("99"))).
+		Headers(
+			"When", "Failed", "Code", "Input URL", "Title", "~Size",
+			"Net", "Con", "Header", "Cookie",
+		).
+		StyleFunc(func(row, col int) lipgloss.Style {
+			switch {
+			case row == 0:
+				return HeaderStyle
+			default:
+				return RowStyle
+			}
+		})
+
+	for _, result := range results {
+		t.Row(
+			result.ProbedAt.Format("Jan 2 15:04:05"),
+			failedStyle(result.Failed),
+			statusCode(result.ResponseCode),
+			urlStyle(result.URL),
+			titleStyle(result.Title),
+			fmt.Sprintf("%dkb", result.ContentLength/1024),
+			fmt.Sprintf("%d", len(result.Network)),
+			fmt.Sprintf("%d", len(result.Console)),
+			fmt.Sprintf("%d", len(result.Headers)),
+			fmt.Sprintf("%d", len(result.Cookies)),
+		)
 	}
-	return nil
+
+	w, _, _ := term.GetSize(os.Stdout.Fd())
+	fmt.Println(lipgloss.NewStyle().MaxWidth(w).Render(t.String()))
 }
 
-// outputCSV prints the report in CSV format
-func outputCSV(d *[]storage.URL) {
+func statusCode(code int) string {
+	var style lipgloss.Style
 
-	wr := csv.NewWriter(os.Stdout)
-	for _, l := range *d {
-		wr.Write(l.MarshallCSV())
+	switch {
+	case code >= 200 && code < 300:
+		style = lipgloss.NewStyle().Foreground(lipgloss.Color("42")) // Green
+	case code >= 300 && code < 400:
+		style = lipgloss.NewStyle().Foreground(lipgloss.Color("220")) // Yellow
+	case code >= 400 && code < 500:
+		style = lipgloss.NewStyle().Foreground(lipgloss.Color("208")) // Orange
+	case code >= 500:
+		style = lipgloss.NewStyle().Foreground(lipgloss.Color("196")) // Red
+	default:
+		style = lipgloss.NewStyle().Foreground(lipgloss.Color("7")) // Light gray
 	}
-	wr.Flush()
+
+	return style.Render(fmt.Sprintf("%d", code))
 }
 
-// outputTable prints the output to stdout in table format
-func outputTable(d *[]storage.URL) {
-
-	table := tablewriter.NewWriter(os.Stdout)
-	table.SetAutoFormatHeaders(false)
-	table.SetAutoWrapText(false)
-	table.SetHeader([]string{"final url", "status", "title"})
-	for _, l := range *d {
-		table.Append([]string{l.FinalURL, strconv.Itoa(l.ResponseCode), l.Title})
+func truncate(s string, maxLength int) string {
+	if len(s) > maxLength {
+		return s[:maxLength] + "..."
 	}
-	table.Render()
+	return s
+}
+
+func failedStyle(s bool) string {
+	var color lipgloss.Color
+	var value string
+
+	if s {
+		color = lipgloss.Color("196")
+		value = "true"
+	} else {
+		color = lipgloss.Color("42")
+		value = "false"
+	}
+
+	return lipgloss.NewStyle().Foreground(color).Render(value)
+}
+
+func urlStyle(url string) string {
+	return lipgloss.NewStyle().Bold(true).Render(url)
+}
+
+func titleStyle(title string) string {
+	return lipgloss.NewStyle().Render(truncate(title, 30))
 }
